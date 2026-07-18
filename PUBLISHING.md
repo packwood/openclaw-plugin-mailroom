@@ -13,7 +13,8 @@ is safe for public disclosure.
    compiled runtime with its OpenClaw peer dependency installed.
 4. Run `openclaw plugins doctor` and inspect the loaded runtime.
 5. Update `CHANGELOG.md` and the package version.
-6. Create a signed Git tag and GitHub release.
+6. Merge the release commit to `main`, then create and push an annotated
+   `v<package-version>` tag. The tag must match `package.json` exactly.
 7. Validate the ClawHub package with a current ClawHub CLI:
 
    ```bash
@@ -21,7 +22,19 @@ is safe for public disclosure.
    clawhub package publish . --family code-plugin --dry-run
    ```
 
-8. Publish only after the dry run, repository visibility, issue tracker,
-   security-advisory channel, and install documentation have all been checked.
+8. Push the tag. The protected `release.yml` workflow reruns verification,
+   publishes through ClawHub trusted publishing, and creates the GitHub release.
+
+The initial release must be published once with an authenticated ClawHub CLI.
+Afterward, configure the repository workflow as the package's trusted publisher:
+
+```bash
+clawhub package trusted-publisher set @packwood/mailroom \
+  --repository packwood/openclaw-plugin-mailroom \
+  --workflow-filename release.yml
+```
+
+Manual publication after trusted publishing is configured is reserved for
+recovery and requires an explicit override reason.
 
 New ClawHub releases may remain hidden until review and verification complete.
