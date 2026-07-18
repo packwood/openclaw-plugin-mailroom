@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.tgz
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.log
+.DS_Store
+reports/
+
+# Operator-local private data — never commit
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+signatures/
+connections.json
+python/mailroom/rulepacks/*.json

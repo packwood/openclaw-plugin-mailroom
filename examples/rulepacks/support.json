@@ -1,0 +1,13 @@
+{
+  "agent": "support-agent",
+  "mailboxes": ["operator@example.com"],
+  "sender_domains": ["customer.example"],
+  "subject_terms": ["support request", "customer issue"],
+  "body_terms": ["needs assistance", "please investigate"],
+  "critical_terms": ["service unavailable"],
+  "exclude_terms": ["automated report"],
+  "threshold": 30,
+  "watcher_threshold": 20,
+  "base_priority": "P2",
+  "metadata": {"workstream": "customer-support"}
+}

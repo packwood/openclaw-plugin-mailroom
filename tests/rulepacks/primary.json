@@ -1,0 +1,9 @@
+{
+  "agent": "primary",
+  "mailboxes": ["operator@example.com"],
+  "subject_terms": ["project redwood", "redwood"],
+  "body_terms": ["project redwood"],
+  "threshold": 30,
+  "watcher_threshold": 20,
+  "base_priority": "P2"
+}

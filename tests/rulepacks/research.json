@@ -1,0 +1,10 @@
+{
+  "agent": "research",
+  "mailboxes": ["operator@example.com"],
+  "sender_emails": ["principal@customer.example"],
+  "subject_terms": ["example research"],
+  "body_terms": ["example research"],
+  "threshold": 30,
+  "watcher_threshold": 20,
+  "base_priority": "P2"
+}

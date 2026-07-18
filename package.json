@@ -1,0 +1,64 @@
+{
+  "name": "@packwood/mailroom",
+  "version": "0.1.0",
+  "description": "Restart-safe, human-approved email workflows for OpenClaw.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/packwood/openclaw-plugin-mailroom.git"
+  },
+  "bugs": {
+    "url": "https://github.com/packwood/openclaw-plugin-mailroom/issues"
+  },
+  "homepage": "https://github.com/packwood/openclaw-plugin-mailroom#readme",
+  "keywords": ["openclaw", "email", "outlook", "approval-workflow", "telegram"],
+  "files": [
+    "dist",
+    "python",
+    "examples",
+    "openclaw.plugin.json",
+    "README.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "PUBLISHING.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:python": "PYTHONPATH=python python3 -m unittest discover -s tests/python -p 'test_*.py'",
+    "test:all": "npm run build && npm test && npm run test:python",
+    "verify:package": "npm run build && node scripts/verify-package.mjs",
+    "prepack": "npm run test:all && node scripts/verify-package.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "openclaw": "^2026.6.11",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.6.11"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "python": ">=3.9"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.6.11",
+      "minGatewayVersion": "2026.6.11"
+    },
+    "build": {
+      "openclawVersion": "2026.6.11",
+      "pluginSdkVersion": "2026.6.11"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/packwood/studio-plugin-mailroom/security/advisories/new
+    about: Report approval bypasses, unintended sends, data exposure, or credential issues privately.

@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible Mailroom problem using synthetic data
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include real mail, credentials, connection IDs, ledgers, or signatures.
+  - type: input
+    id: version
+    attributes:
+      label: Mailroom and OpenClaw versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Synthetic reproduction
+      description: Include the starting state, action, and observed transition.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This report contains no private email or secret material.
+          required: true

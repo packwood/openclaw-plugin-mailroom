@@ -1,0 +1,60 @@
+{
+  "id": "mailroom",
+  "name": "Mailroom Approvals",
+  "description": "Restart-safe Telegram approval cards for Mailroom Outlook drafts and sends.",
+  "activation": {"onStartup": true},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "SQLite ledger path. Defaults to ~/.openclaw/mailroom/mailroom.db."
+      },
+      "pythonPath": {
+        "type": "string",
+        "description": "Optional Python module root. Defaults to the package's bundled python directory."
+      },
+      "pythonExecutable": {
+        "type": "string",
+        "default": "python3"
+      },
+      "telegramChatId": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Telegram chat authorized to approve Mailroom actions."
+      },
+      "reviewOwners": {
+        "type": "array",
+        "items": {"type": "string"},
+        "default": [],
+        "description": "OpenClaw agent IDs used when routingOwnerMode is selected. Also retained as an upgrade fallback."
+      },
+      "routingOwnerMode": {
+        "type": "string",
+        "enum": ["all", "selected"],
+        "default": "all",
+        "description": "Make every profiled/discovered OpenClaw agent routable, or only reviewOwners."
+      },
+      "profilesPath": {
+        "type": "string",
+        "pattern": "(^|[/\\\\])current\\.json$",
+        "description": "Effective responsibility-profile JSON. Must end in current.json; defaults to ~/.openclaw/mailroom/responsibility-profiles/current.json."
+      },
+      "accounts": {
+        "type": "object",
+        "additionalProperties": {"type": "string"},
+        "default": {},
+        "description": "Optional map of friendly account IDs to mailbox email addresses."
+      },
+      "connectionsPath": {
+        "type": "string",
+        "description": "Path to OpenClaw's Outlook connection registry."
+      },
+      "signaturesPath": {
+        "type": "string",
+        "description": "Optional directory containing <account>.html signatures."
+      }
+    }
+  }
+}
