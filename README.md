@@ -1,12 +1,30 @@
 # Mailroom for OpenClaw
 
-Mailroom is a restart-safe, human-approved email workflow for OpenClaw. It
-ingests Outlook conversations, routes them to OpenClaw agents, proposes replies,
-and requires two explicit Telegram approvals before sending.
+Mailroom automatically discovers your OpenClaw agent fleet and builds smart
+Agent Responsibility Profiles from bounded, provenance-tracked workspace,
+context, and memory evidence. It combines those evolving profiles with
+deterministic rules and semantic triage to route Outlook email to the
+best-qualified agent, while ambiguous decisions go to a human routing review.
+
+The owning agent drafts in its persistent main session using workspace
+knowledge, the complete email conversation, attachment metadata, routing
+rationale, the authoritative email-drafting policy, and authorized read-only
+context sources. A private Telegram workflow provides button-based routing,
+revision, deferral, safety checks, draft approval, and a separate
+fingerprint-bound authorization before anything is sent.
 
 > **Project status:** alpha. The safety invariants are extensively tested, but
 > installation still assumes an Outlook connection through the Maton Graph
 > gateway and a Telegram channel configured in OpenClaw.
+
+## How Mailroom works
+
+![Mailroom end-to-end workflow](docs/mailroom-workflow.svg)
+
+The editable [Mermaid source](docs/mailroom-workflow.mmd) is included with the
+package. The profile generator can run on a schedule to keep responsibilities
+current as agents and their workspaces evolve; persistent operator overrides
+are reapplied to every generated baseline.
 
 ## Safety model
 
