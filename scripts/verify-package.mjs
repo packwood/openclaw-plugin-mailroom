@@ -12,6 +12,8 @@ const required = [
   "dist/outlook.js",
   "python/mailroom/cli.py",
   "python/mailroom/ledger.py",
+  "docs/mailroom-workflow.mmd",
+  "docs/mailroom-workflow.svg",
   "openclaw.plugin.json",
   "README.md",
   "ARCHITECTURE.md",

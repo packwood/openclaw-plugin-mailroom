@@ -1,0 +1,129 @@
+flowchart TB
+    subgraph Profiles["Agent Responsibility Profile lifecycle"]
+        direction LR
+        P1["Discover the configured<br/>OpenClaw agent fleet"]
+        P2["Collect bounded, provenance-tracked<br/>workspace, context, and memory evidence"]
+        P3["Generate one Agent Responsibility<br/>Profile per agent"]
+        P4["Refine the fleet together<br/>specialties, overlap, entities, exclusions"]
+        P5{"Exact fleet coverage<br/>and schema valid?"}
+        P6["Merge persistent<br/>operator overrides"]
+        P7["Atomically publish content-addressed<br/>baseline and effective profiles"]
+        P8["The next scheduled run repeats discovery<br/>and keeps profiles current"]
+        PF["Fail closed and retain<br/>the last valid profile set"]
+
+        P1 --> P2 --> P3 --> P4 --> P5
+        P5 -->|"Yes"| P6 --> P7 --> P8
+        P5 -->|"No"| PF
+    end
+
+    subgraph Intake["Outlook intake and smart routing"]
+        direction LR
+        I1["Poll Outlook through<br/>the configured adapter"]
+        I2["Normalize email, recipients,<br/>thread, and attachment metadata"]
+        I3["Deduplicate and persist<br/>restart-safe state"]
+        I4{"Noise, duplicate, or<br/>already answered?"}
+        I5["Suppress safely and<br/>record the reason"]
+        R1["Apply deterministic rules and<br/>semantic triage against all profiles"]
+        R2{"One well-supported<br/>owner?"}
+        R3["Assign the best-qualified<br/>OpenClaw agent"]
+        R4["Send a Telegram<br/>routing-review card"]
+        R5["Operator chooses an agent<br/>or marks Not Relevant"]
+
+        I1 --> I2 --> I3 --> I4
+        I4 -->|"Yes"| I5
+        I4 -->|"No"| R1 --> R2
+        R2 -->|"Yes"| R3
+        R2 -->|"Ambiguous"| R4 --> R5
+        R5 -->|"Agent selected"| R3
+        R5 -->|"Not Relevant"| I5
+    end
+
+    subgraph Drafting["Context-rich drafting"]
+        direction LR
+        D1["Open the owning agent's<br/>persistent main session"]
+        D2["Supply complete conversation,<br/>newer messages, attachment metadata,<br/>routing rationale, and drafting policy"]
+        D3["Agent uses workspace knowledge<br/>and authorized read-only sources"]
+        D4{"Reply warranted?"}
+        D5["Record no-reply decision"]
+        D6["Generate nuanced<br/>reply proposal"]
+        D7{"Drafting-policy<br/>validation passes?"}
+        D8["Retry once with corrective guidance<br/>and revalidate before continuing"]
+
+        D1 --> D2 --> D3 --> D4
+        D4 -->|"No"| D5
+        D4 -->|"Yes"| D6 --> D7
+        D7 -->|"No"| D8
+    end
+
+    subgraph Approval["Private Telegram approval workflow"]
+        direction TB
+        A1["Proposal card<br/>Approve Draft · Revise · Defer<br/>Already Responded · New Email Check · Deny"]
+        A2{"Operator action"}
+        A3["Collect chat-bound revision instructions<br/>and requeue through context-rich drafting"]
+        A4["Defer until the<br/>selected time"]
+        A5["Suppress response and<br/>clean up stale drafts"]
+        A6["Refresh Inbox and Sent Items<br/>then requeue if newer context exists"]
+        A7["Deny and close<br/>without sending"]
+        G1["Recheck policy, Inbox,<br/>Sent Items, and workflow state"]
+        O1["Create an Outlook draft<br/>creating never sends"]
+        O2["Fingerprint recipients, subject,<br/>body, and attachments"]
+        A8["Send card<br/>Send · Revise · Defer<br/>Already Responded · New Email Check · Cancel"]
+        A9{"Operator action"}
+        G2["Revalidate exact fingerprint,<br/>policy, thread, and ledger state"]
+        O3["Submit the exact<br/>Outlook draft"]
+        O4["Cancel and leave the<br/>Outlook draft unsent"]
+
+        A1 --> A2
+        A2 -->|"Approve Draft"| G1 --> O1 --> O2 --> A8 --> A9
+        A2 -->|"Revise"| A3
+        A2 -->|"Defer"| A4
+        A2 -->|"Already Responded"| A5
+        A2 -->|"New Email Check"| A6
+        A2 -->|"Deny"| A7
+        A9 -->|"Send"| G2 --> O3
+        A9 -->|"Revise"| A3
+        A9 -->|"Defer"| A4
+        A9 -->|"Already Responded"| A5
+        A9 -->|"New Email Check"| A6
+        A9 -->|"Cancel"| O4
+    end
+
+    subgraph Verification["Send verification and safe recovery"]
+        direction LR
+        V1["Record SEND_ACCEPTED<br/>or SEND_OUTCOME_UNKNOWN"]
+        V2["Reconcile against<br/>Outlook Sent Items"]
+        V3{"Approved message<br/>found exactly?"}
+        V4["Record SENT_VERIFIED"]
+        V5["Remain pending or unresolved<br/>reconcile again later and never retry<br/>an ambiguous send automatically"]
+
+        V1 --> V2 --> V3
+        V3 -->|"Yes"| V4
+        V3 -->|"Not yet"| V5
+    end
+
+    Ledger[("SQLite ledger<br/>tokens, versions, drafts,<br/>events, approvals, reconciliation")]
+
+    P7 --> R1
+    R3 --> D1
+    D7 -->|"Yes"| A1
+    O3 --> V1
+
+    I3 -.-> Ledger
+    R3 -.-> Ledger
+    D6 -.-> Ledger
+    A1 -.-> Ledger
+    O1 -.-> Ledger
+    V4 -.-> Ledger
+    V5 -.-> Ledger
+
+    classDef profile fill:#e8f1ff,stroke:#4078c0,color:#102a43
+    classDef human fill:#fff4d6,stroke:#c68a00,color:#4b3500
+    classDef safety fill:#ffe8e8,stroke:#c44545,color:#5b1111
+    classDef success fill:#e7f7ed,stroke:#2e8b57,color:#123b25
+    classDef ledger fill:#eee8ff,stroke:#7357b8,color:#2e2054
+
+    class P1,P2,P3,P4,P6,P7,P8 profile
+    class R4,R5,A1,A2,A3,A4,A5,A6,A7,A8,A9 human
+    class PF,I5,D5,O4,V5 safety
+    class R3,D6,O1,O3,V4 success
+    class Ledger ledger

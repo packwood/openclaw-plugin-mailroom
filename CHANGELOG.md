@@ -5,6 +5,16 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-18
+
+### Changed
+
+- Expanded the GitHub and ClawHub description to explain automatic fleet
+  profiling, scheduled profile evolution, smart routing, context-rich drafting,
+  and button-based approval workflows.
+- Added a packaged Mermaid workflow diagram and rendered SVG for GitHub and
+  ClawHub documentation.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added
