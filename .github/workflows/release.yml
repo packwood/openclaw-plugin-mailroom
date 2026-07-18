@@ -1,16 +1,13 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,20 +20,37 @@ jobs:
           python-version: "3.13"
       - run: npm ci
       - name: Verify tag matches package version
-        run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
       - run: npm run test:all
       - run: npm run verify:package
       - run: npm install --global clawhub@0.23.1
       - run: clawhub package validate .
-      - name: Publish to ClawHub
-        run: >-
-          clawhub package publish .
-          --family code-plugin
-          --source-repo "$GITHUB_REPOSITORY"
-          --source-commit "$GITHUB_SHA"
-          --source-ref "$GITHUB_REF_NAME"
-          --json
+
+  publish:
+    needs: validate
+    permissions:
+      contents: read
+      id-token: write
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@v0.18.0
+    with:
+      source: packwood/openclaw-plugin-mailroom
+      ref: ${{ github.sha }}
+      dry_run: false
+      tags: latest
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --generate-notes
