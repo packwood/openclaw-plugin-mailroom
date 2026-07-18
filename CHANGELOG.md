@@ -5,6 +5,8 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-18
+
 ### Added
 
 - Self-contained Python workflow engine and SQLite migrations.
