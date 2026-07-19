@@ -5,6 +5,14 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-19
+
+### Changed
+
+- Renamed the plugin display name from `Mailroom Approvals` to `Mailroom` to
+  reflect its broader responsibility-profile, routing, drafting, and approval
+  workflow.
+
 ## [0.1.1] - 2026-07-18
 
 ### Changed
