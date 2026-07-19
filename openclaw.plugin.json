@@ -1,6 +1,6 @@
 {
   "id": "mailroom",
-  "name": "Mailroom Approvals",
+  "name": "Mailroom",
   "description": "Build evolving Agent Responsibility Profiles, route Outlook email to the best OpenClaw agent, draft with authorized context, and manage human approval in Telegram.",
   "activation": {"onStartup": true},
   "configSchema": {
