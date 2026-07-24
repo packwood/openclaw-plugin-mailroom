@@ -78,6 +78,11 @@ class FakeNotifier:
         return "97"
 
 
+class FallbackNotifier(FakeNotifier):
+    def resolve_account_id(self, requested, fallback):
+        return fallback
+
+
 class FailingNotifier(FakeNotifier):
     def send(self, **kwargs):
         self.calls.append(kwargs)
@@ -158,6 +163,26 @@ class DispatcherTests(unittest.TestCase):
         ]
         self.assertLessEqual(len(callback.encode("utf-8")), 64)
         self.assertNotIn(owner, callback)
+
+    def test_telegram_notifier_falls_back_for_owner_without_a_bot_account(self):
+        completed = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "chat": {"telegram": {"accounts": ["default", "recon"]}},
+            }),
+            stderr="",
+        )
+        notifier = TelegramCardNotifier()
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run", return_value=completed,
+        ) as run:
+            self.assertEqual(
+                notifier.resolve_account_id("main", "default"), "default",
+            )
+            self.assertEqual(
+                notifier.resolve_account_id("recon", "default"), "recon",
+            )
+        self.assertEqual(run.call_count, 1)
 
     def test_openclaw_runner_preserves_gateway_claude_cli_session_contract(self):
         payload = {
@@ -341,6 +366,14 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("configured workspace instructions and email workflow", runner.calls[0][1])
         self.assertIn("context_checks", runner.calls[0][1])
         self.assertIn("Workflow checks: email=used", notifier.calls[0]["text"])
+
+    def test_card_binding_uses_notifier_resolved_fallback_account(self):
+        notifier = FallbackNotifier()
+        summary = self.dispatcher(FakeRunner(), notifier).run()
+        self.assertEqual((summary.drafted, summary.cards_sent), (1, 1))
+        self.assertEqual(notifier.calls[0]["account_id"], "default")
+        item = self.ledger.get(self.item["mail_item_id"])
+        self.assertEqual(item["card_account_id"], "default")
 
     def test_overlapping_cycle_cannot_redraft_an_active_lease(self):
         nested_runner = FakeRunner()

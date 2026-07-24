@@ -187,6 +187,32 @@ def _routing_owner_callback_ref(owner: str) -> str:
 class TelegramCardNotifier:
     def __init__(self, executable: str = "openclaw"):
         self.executable = executable
+        self._telegram_accounts: set[str] | None = None
+
+    def resolve_account_id(self, requested: str, fallback: str) -> str:
+        """Use the owner bot when configured, otherwise the shared review bot."""
+        if self._telegram_accounts is None:
+            completed = subprocess.run(
+                [self.executable, "channels", "list", "--json"],
+                text=True, capture_output=True, timeout=30,
+            )
+            if completed.returncode != 0:
+                return requested
+            payload = _decode_json_object(completed.stdout)
+            chat = payload.get("chat")
+            telegram = chat.get("telegram") if isinstance(chat, dict) else None
+            accounts = telegram.get("accounts") if isinstance(telegram, dict) else None
+            if not isinstance(accounts, list):
+                return requested
+            self._telegram_accounts = {
+                account for account in accounts
+                if isinstance(account, str) and account
+            }
+        if requested in self._telegram_accounts:
+            return requested
+        if fallback in self._telegram_accounts:
+            return fallback
+        return requested
 
     def send(self, *, account_id: str, chat_id: str, text: str, token: str) -> str:
         presentation = {
@@ -419,12 +445,13 @@ class DraftDispatcher:
                 if item.get("card_message_id"):
                     continue
                 proposal = json.loads(item["proposal_json"])
+                account_id = self._card_account_id(item["draft_owner"])
                 message_id = self.notifier.send(
-                    account_id=item["draft_owner"], chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=self.telegram_chat_id,
                     text=_format_card(item, proposal), token=item["callback_token"],
                 )
                 self.ledger.attach_card(
-                    item["mail_item_id"], channel="telegram", account_id=item["draft_owner"],
+                    item["mail_item_id"], channel="telegram", account_id=account_id,
                     chat_id=self.telegram_chat_id, message_id=message_id,
                 )
                 cards_sent += 1
@@ -442,12 +469,13 @@ class DraftDispatcher:
                 item = self._ensure_attachments(item)
                 if item.get("card_message_id"):
                     continue
+                account_id = self._card_account_id(item["draft_owner"])
                 message_id = self.notifier.send_send_approval(
-                    account_id=item["draft_owner"], chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=self.telegram_chat_id,
                     text=_format_send_approval(item), token=item["callback_token"],
                 )
                 self.ledger.attach_card(
-                    item["mail_item_id"], channel="telegram", account_id=item["draft_owner"],
+                    item["mail_item_id"], channel="telegram", account_id=account_id,
                     chat_id=self.telegram_chat_id, message_id=message_id,
                 )
                 cards_sent += 1
@@ -491,6 +519,12 @@ class DraftDispatcher:
                 "UPDATE mail_items SET last_error = ?, updated_at = ? WHERE mail_item_id = ?",
                 (str(exc)[:2000], _utcnow(), mail_item_id),
             )
+
+    def _card_account_id(self, owner: str) -> str:
+        resolver = getattr(self.notifier, "resolve_account_id", None)
+        if callable(resolver):
+            return str(resolver(owner, self.review_account_id))
+        return owner
 
     def revise(
         self,

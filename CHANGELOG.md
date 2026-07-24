@@ -5,6 +5,14 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-24
+
+### Fixed
+
+- Deliver approval cards through the shared review Telegram account when the
+  owning agent does not have a dedicated Telegram bot, while preserving the
+  owning agent's routing and drafting responsibility.
+
 ## [0.1.5] - 2026-07-24
 
 ### Added
