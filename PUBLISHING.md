@@ -22,8 +22,10 @@ is safe for public disclosure.
    clawhub package publish . --family code-plugin --dry-run
    ```
 
-8. Push the tag. The protected `release.yml` workflow reruns verification,
-   publishes through ClawHub trusted publishing, and creates the GitHub release.
+8. Push the tag, then dispatch the protected `release.yml` workflow against
+   that tag. The workflow reruns verification, publishes the exact verified
+   npm-pack tarball through ClawHub trusted publishing, and creates the GitHub
+   release.
 
 The initial release must be published once with an authenticated ClawHub CLI.
 Afterward, configure the repository workflow as the package's trusted publisher:

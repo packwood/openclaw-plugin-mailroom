@@ -5,6 +5,13 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-24
+
+### Fixed
+
+- Publish the exact locally built and verified npm-pack tarball to ClawHub so
+  the release includes the declared `dist/index.js` runtime entry.
+
 ## [0.1.2] - 2026-07-19
 
 ### Changed

@@ -7,8 +7,11 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,18 +30,33 @@ jobs:
       - run: npm run verify:package
       - run: npm install --global clawhub@0.23.1
       - run: clawhub package validate .
-
-  publish:
-    needs: validate
-    permissions:
-      contents: read
-      id-token: write
-    uses: openclaw/clawhub/.github/workflows/package-publish.yml@v0.18.0
-    with:
-      source: packwood/openclaw-plugin-mailroom
-      ref: ${{ github.sha }}
-      dry_run: false
-      tags: latest
+      - name: Build exact release artifact
+        id: artifact
+        run: |
+          artifact="$(npm pack --silent | tail -n 1)"
+          test -n "$artifact"
+          test -f "$artifact"
+          tar -tzf "$artifact" | grep -qx 'package/dist/index.js'
+          echo "path=$artifact" >> "$GITHUB_OUTPUT"
+      - name: Validate exact release artifact
+        run: >-
+          clawhub package publish "${{ steps.artifact.outputs.path }}"
+          --family code-plugin
+          --source-repo "$GITHUB_REPOSITORY"
+          --source-commit "$GITHUB_SHA"
+          --source-ref "$GITHUB_REF"
+          --tags latest
+          --dry-run
+          --json
+      - name: Publish exact release artifact
+        run: >-
+          clawhub package publish "${{ steps.artifact.outputs.path }}"
+          --family code-plugin
+          --source-repo "$GITHUB_REPOSITORY"
+          --source-commit "$GITHUB_SHA"
+          --source-ref "$GITHUB_REF"
+          --tags latest
+          --json
 
   github-release:
     needs: publish
