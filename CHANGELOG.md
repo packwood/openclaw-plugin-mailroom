@@ -5,6 +5,13 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-24
+
+### Fixed
+
+- Clean Python bytecode caches and rebuild the runtime after prepack tests so
+  packaging remains reproducible across supported Python versions.
+
 ## [0.1.3] - 2026-07-24
 
 ### Fixed
