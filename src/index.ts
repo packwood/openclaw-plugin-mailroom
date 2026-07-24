@@ -487,7 +487,7 @@ async function validateProposalPolicy(cfg: Config, item: Item): Promise<Record<s
   );
   const result = JSON.parse(stdout);
   if (typeof result?.ok !== "boolean" || !Array.isArray(result?.violations)) {
-    throw new Error("Mailroom policy validator returned a malformed result");
+    throw new Error("Mailroom draft validator returned a malformed result");
   }
   return result;
 }
@@ -1093,27 +1093,27 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
     }
 
     if (action === "approve") {
-      let policyResult: Record<string, any>;
+      let validationResult: Record<string, any>;
       try {
-        policyResult = await validateProposalPolicy(cfg, item);
+        validationResult = await validateProposalPolicy(cfg, item);
       } catch (error: any) {
-        logInternalError("draft policy validation failed", error);
+        logInternalError("draft validation failed", error);
         await ctx.respond.reply({
-          text: `Draft approval blocked: policy validation was unavailable. Nothing was created. ${LOCAL_ERROR_NOTE}`,
+          text: `Draft approval blocked: draft validation was unavailable. Nothing was created. ${LOCAL_ERROR_NOTE}`,
         });
         return { handled: true };
       }
-      if (!policyResult.ok) {
+      if (!validationResult.ok) {
         const queued = claim(
-          db, item, ["DRAFT_PROPOSED"], "DRAFT_REQUESTED", "mailroom-policy-gate",
+          db, item, ["DRAFT_PROPOSED"], "DRAFT_REQUESTED", "mailroom-draft-gate",
           {
             card_message_id: null,
-            last_error: `Policy revalidation requested: ${policyResult.violations.join("; ")}`.slice(0, 2000),
+            last_error: `Draft revalidation requested: ${validationResult.violations.join("; ")}`.slice(0, 2000),
           },
         );
         await ctx.respond.editMessage({
           text: queued
-            ? "♻️ This proposal predates or violates the current email-drafting policy. It was not approved and has been queued for a fresh draft."
+            ? "♻️ This proposal failed Mailroom's workflow-neutral draft checks. It was not approved and has been queued for a fresh draft."
             : "This draft decision was already handled.",
           buttons: [],
         });
@@ -1174,17 +1174,17 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
 
     if (action === "send") {
       try {
-        const policyResult = await validateProposalPolicy(cfg, item);
-        if (!policyResult.ok) {
+        const validationResult = await validateProposalPolicy(cfg, item);
+        if (!validationResult.ok) {
           await ctx.respond.reply({
-            text: "Send blocked: this Outlook draft was generated from a proposal that predates or violates the current email-drafting policy. Choose Revise to generate a compliant replacement.",
+            text: "Send blocked: this Outlook draft no longer passes Mailroom's workflow-neutral draft checks. Choose Revise to generate a replacement.",
           });
           return { handled: true };
         }
       } catch (error: any) {
-        logInternalError("send policy validation failed", error);
+        logInternalError("send draft validation failed", error);
         await ctx.respond.reply({
-          text: `Send blocked: policy validation was unavailable. Nothing was sent. ${LOCAL_ERROR_NOTE}`,
+          text: `Send blocked: draft validation was unavailable. Nothing was sent. ${LOCAL_ERROR_NOTE}`,
         });
         return { handled: true };
       }

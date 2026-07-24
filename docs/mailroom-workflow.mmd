@@ -41,12 +41,12 @@ flowchart TB
     subgraph Drafting["Context-rich drafting"]
         direction LR
         D1["Open the owning agent's<br/>persistent main session"]
-        D2["Supply complete conversation,<br/>newer messages, attachment metadata,<br/>routing rationale, and drafting policy"]
-        D3["Agent uses workspace knowledge<br/>and authorized read-only sources"]
+        D2["Supply complete conversation,<br/>newer messages, attachment metadata,<br/>and routing rationale"]
+        D3["Agent uses its current email workflow,<br/>workspace context, skills, and read-only tools"]
         D4{"Reply warranted?"}
         D5["Record no-reply decision"]
         D6["Generate nuanced<br/>reply proposal"]
-        D7{"Drafting-policy<br/>validation passes?"}
+        D7{"Workflow-neutral draft<br/>checks pass?"}
         D8["Retry once with corrective guidance<br/>and revalidate before continuing"]
 
         D1 --> D2 --> D3 --> D4

@@ -23,7 +23,12 @@ from .catchup import CatchupScanner
 from .attachments import MatonAttachmentReader
 from .controller import ShadowController, ShadowRunSummary
 from .conversation import MatonConversationReader
-from .dispatcher import DraftDispatcher, OpenClawAgentRunner, TelegramCardNotifier
+from .dispatcher import (
+    DraftDispatcher,
+    OpenClawAgentRunner,
+    TelegramCardNotifier,
+    proposal_violations,
+)
 from .drafting_policy import DraftingPolicy
 from .intake import MatonDeltaIntake
 from .ledger import DEFAULT_DB, MailroomLedger
@@ -127,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("item")
     validate = sub.add_parser(
         "validate-proposal",
-        help="Read-only current-skill validation for an approval gate",
+        help="Read-only workflow-neutral validation for an approval gate",
     )
     validate.add_argument("item")
 
@@ -376,16 +381,12 @@ def main(argv: list[str] | None = None) -> int:
         except json.JSONDecodeError:
             proposal = {}
         policy = DraftingPolicy.load()
-        violations = policy.stored_proposal_violations(
-            proposal,
-            sender_name=item.get("sender_name"),
-        )
+        violations = proposal_violations(item, proposal, policy=policy)
         _print(
             {
                 "ok": not violations,
                 "mail_item_id": item["mail_item_id"],
-                "policy_version": policy.version,
-                "skill_sha256": policy.skill_sha256,
+                "quality_gate_version": policy.version,
                 "violations": violations,
             }
         )

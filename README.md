@@ -8,8 +8,13 @@ best-qualified agent, while ambiguous decisions go to a human routing review.
 
 The owning agent drafts in its persistent main session using workspace
 knowledge, the complete email conversation, attachment metadata, routing
-rationale, the authoritative email-drafting policy, and authorized read-only
-context sources. A private Telegram workflow provides button-based routing,
+rationale, its current email workflow, and relevant authorized read-only
+skills and tools. Mailroom does not depend on named skill paths: agents attest
+that they used their configured email workflow, and direct availability
+requests additionally require a fresh, complete calendar check plus concrete
+times. Trusted OpenClaw run, session, and observed tool names are stored as
+diagnostic provenance, not as approval requirements. A private Telegram
+workflow provides button-based routing,
 revision, deferral, safety checks, draft approval, and a separate
 fingerprint-bound authorization before anything is sent.
 
@@ -33,6 +38,8 @@ are reapplied to every generated baseline.
 - Callback identity is bound to the authorized Telegram account, chat, message,
   and an opaque ledger token.
 - Every state transition is persisted in SQLite with optimistic concurrency.
+- Draft workers use version-bound leases, so an expired worker cannot overwrite
+  a newer proposal after recovery.
 - Mailroom checks Sent Items before drafting, revising, and sending so a newer
   manual reply suppresses automation.
 - A successful send request remains unverified until reconciliation finds the
