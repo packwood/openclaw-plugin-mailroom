@@ -33,7 +33,7 @@ jobs:
       - name: Build exact release artifact
         id: artifact
         run: |
-          artifact="$(npm pack --silent | tail -n 1)"
+          artifact="$(npm pack --ignore-scripts --silent | tail -n 1)"
           test -n "$artifact"
           test -f "$artifact"
           tar -tzf "$artifact" | grep -qx 'package/dist/index.js'
