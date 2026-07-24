@@ -126,6 +126,7 @@ class LedgerTests(unittest.TestCase):
             draft_owner="primary", watchers=(), confidence=0.9, reasons=("subject",), outcome="ROUTED",
         ))
         item = self.ledger.request_draft(item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Thanks"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -267,6 +268,7 @@ class LedgerTests(unittest.TestCase):
             reasons=("subject:redwood",), outcome="ROUTED",
         ))
         requested = self.ledger.request_draft(routed["mail_item_id"])
+        requested = self.ledger.start_drafting(requested["mail_item_id"])
         proposed = self.ledger.propose_draft(requested["mail_item_id"], {
             "reply_text": "Thank you.", "reply_all": "auto", "rationale": "Acknowledges receipt.",
         })
@@ -284,6 +286,62 @@ class LedgerTests(unittest.TestCase):
             card["callback_token"], channel="telegram", account_id="legal",
             chat_id="123456789", message_id="42",
         ))
+
+    def test_expired_worker_cannot_complete_after_drafting_lease_is_reissued(self):
+        item, _ = self.ledger.upsert_message(message(), run_mode="production")
+        item = self.ledger.route(item["mail_item_id"], RouteDecision(
+            draft_owner="primary", watchers=(), confidence=0.9,
+            reasons=("subject:redwood",), outcome="ROUTED",
+        ))
+        item = self.ledger.request_draft(item["mail_item_id"])
+        expired_worker = self.ledger.start_drafting(item["mail_item_id"])
+        recovered = self.ledger.transition(
+            item["mail_item_id"], MailState.DRAFT_REQUESTED,
+            actor="test:lease-recovery",
+            expected_states=[MailState.DRAFTING],
+            expected_version=expired_worker["version"],
+        )
+        current_worker = self.ledger.start_drafting(recovered["mail_item_id"])
+        with self.assertRaises(ConcurrentUpdate):
+            self.ledger.propose_draft(
+                item["mail_item_id"], {"reply_text": "Stale result"},
+                expected_version=expired_worker["version"],
+            )
+        proposed = self.ledger.propose_draft(
+            item["mail_item_id"], {"reply_text": "Current result"},
+            expected_version=current_worker["version"],
+        )
+        self.assertIn("Current result", proposed["proposal_json"])
+
+    def test_draft_provenance_is_copied_to_the_event_ledger(self):
+        item, _ = self.ledger.upsert_message(message(), run_mode="production")
+        item = self.ledger.route(item["mail_item_id"], RouteDecision(
+            draft_owner="primary", watchers=(), confidence=0.9,
+            reasons=("subject:redwood",), outcome="ROUTED",
+        ))
+        item = self.ledger.request_draft(item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        provenance = {
+            "run_id": "run-123", "session_id": "session-123",
+            "tool_names": ["Bash"], "audit_status": "complete",
+        }
+        self.ledger.propose_draft(
+            item["mail_item_id"],
+            {"reply_text": "Thanks", "_mailroom_provenance": provenance},
+            expected_version=item["version"],
+        )
+        with self.ledger.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT metadata_json FROM mail_events
+                WHERE mail_item_id = ? AND to_state = 'DRAFT_PROPOSED'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (item["mail_item_id"],),
+            ).fetchone()
+        self.assertEqual(
+            json.loads(row["metadata_json"])["draft_provenance"], provenance,
+        )
 
 
 if __name__ == "__main__":

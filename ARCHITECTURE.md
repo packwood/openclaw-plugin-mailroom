@@ -51,9 +51,13 @@ flowchart LR
 3. Outlook is the source of truth for whether a message was sent. HTTP success
    alone is not the terminal state.
 4. The SQLite ledger is durable coordination state. All competing transitions
-   use a version claim in an immediate transaction.
+   use a version claim in an immediate transaction. Draft generation also uses
+   a recoverable version-bound lease to prevent stale-worker ABA races.
 5. Plugins execute as trusted Gateway code. Operators must review dependencies,
    protect the ledger and connection files, and use an explicit plugin allowlist.
+6. The persistent agent owns email and calendar workflow selection. Mailroom
+   validates workflow-neutral attestations and draft outcomes without importing
+   named skills. OpenClaw run/session/tool metadata is diagnostic evidence only.
 
 ## Adapter boundary
 

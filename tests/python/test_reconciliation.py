@@ -34,6 +34,7 @@ class ReconciliationTests(unittest.TestCase):
             draft_owner="primary", watchers=(), confidence=0.9, reasons=("subject",), outcome="ROUTED",
         ))
         item = self.ledger.request_draft(item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Thanks"})
         item = self.ledger.transition(item["mail_item_id"], MailState.OUTLOOK_DRAFTING, actor="test")
         item = self.ledger.transition(item["mail_item_id"], MailState.OUTLOOK_DRAFTED, actor="test")

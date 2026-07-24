@@ -5,6 +5,30 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-24
+
+### Added
+
+- Record trusted OpenClaw run, session, and observed tool metadata with each
+  proposal for diagnostics without making specific tools an approval gate.
+- Require workflow-neutral drafting attestations and show email/calendar check
+  status on approval cards.
+
+### Changed
+
+- Delegate email and scheduling workflow selection to each persistent agent's
+  current workspace instructions, skills, context, and read-only tools rather
+  than loading named skill paths in Mailroom.
+- Require fresh, complete calendar evidence and concrete times when the sender
+  directly asks for availability.
+
+### Fixed
+
+- Prevent overlapping dispatcher cycles and expired workers from replacing or
+  poisoning a newer draft through version-bound drafting leases.
+- Revalidate revised and legacy proposals before Outlook draft creation so a
+  stale approval card queues a fresh proposal instead of being consumed.
+
 ## [0.1.4] - 2026-07-24
 
 ### Fixed

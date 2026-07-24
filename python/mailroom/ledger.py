@@ -24,9 +24,10 @@ ALLOWED_TRANSITIONS: dict[MailState, set[MailState]] = {
     MailState.INGESTED: {MailState.ROUTING_REVIEW, MailState.ROUTED, MailState.DROPPED, MailState.ERROR},
     MailState.ROUTING_REVIEW: {MailState.ROUTED, MailState.DROPPED, MailState.ERROR},
     MailState.ROUTED: {MailState.DRAFT_REQUESTED, MailState.DROPPED, MailState.DEFERRED, MailState.DENIED_MESSAGE, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
-    MailState.DRAFT_REQUESTED: {MailState.DRAFT_PROPOSED, MailState.DROPPED, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
+    MailState.DRAFT_REQUESTED: {MailState.DRAFTING, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
+    MailState.DRAFTING: {MailState.DRAFT_REQUESTED, MailState.DRAFT_PROPOSED, MailState.DROPPED, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
     MailState.DRAFT_PROPOSED: {MailState.DRAFT_REQUESTED, MailState.REVISION_REQUESTED, MailState.DEFERRED, MailState.DENIED_MESSAGE, MailState.REPLIED_ELSEWHERE, MailState.OUTLOOK_DRAFTING, MailState.CANCELLED, MailState.ERROR},
-    MailState.REVISION_REQUESTED: {MailState.DRAFT_REQUESTED, MailState.DRAFT_PROPOSED, MailState.REPLIED_ELSEWHERE, MailState.OUTLOOK_DRAFTED, MailState.CANCELLED, MailState.ERROR},
+    MailState.REVISION_REQUESTED: {MailState.DRAFT_REQUESTED, MailState.DRAFTING, MailState.DRAFT_PROPOSED, MailState.REPLIED_ELSEWHERE, MailState.OUTLOOK_DRAFTED, MailState.CANCELLED, MailState.ERROR},
     MailState.DEFERRED: {MailState.ROUTED, MailState.DRAFT_PROPOSED, MailState.SEND_APPROVAL_PENDING, MailState.DENIED_MESSAGE, MailState.CANCELLED},
     MailState.OUTLOOK_DRAFTING: {MailState.OUTLOOK_DRAFTED, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
     MailState.OUTLOOK_DRAFTED: {MailState.SEND_APPROVAL_PENDING, MailState.REVISION_REQUESTED, MailState.DEFERRED, MailState.CANCELLED, MailState.ERROR},
@@ -611,6 +612,7 @@ class MailroomLedger:
         *,
         actor: str,
         expected_states: Sequence[MailState] | None = None,
+        expected_version: int | None = None,
         metadata: dict[str, Any] | None = None,
         patch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -630,6 +632,11 @@ class MailroomLedger:
             current = MailState(row["state"])
             if expected_states is not None and current not in set(expected_states):
                 raise ConcurrentUpdate(f"{mail_item_id}: expected {expected_states}, found {current}")
+            if expected_version is not None and row["version"] != expected_version:
+                raise ConcurrentUpdate(
+                    f"{mail_item_id}: expected version {expected_version}, "
+                    f"found {row['version']}"
+                )
             self._assert_transition(current, to_state)
             assignments = ["state = ?", "updated_at = ?", "version = version + 1"]
             values: list[Any] = [to_state.value, utcnow()]
@@ -827,6 +834,16 @@ class MailroomLedger:
             expected_states=[MailState.ROUTED],
         )
 
+    def start_drafting(
+        self, mail_item_id: str, *, actor: str = "dispatcher",
+        expected_states: Sequence[MailState] = (MailState.DRAFT_REQUESTED,),
+    ) -> dict[str, Any]:
+        """Atomically lease one draft to one worker by moving it out of the queue."""
+        return self.transition(
+            mail_item_id, MailState.DRAFTING, actor=actor,
+            expected_states=expected_states,
+        )
+
     def record_conversation(
         self, mail_item_id: str, messages: list[dict[str, Any]], *, actor: str = "context-reader",
     ) -> dict[str, Any]:
@@ -851,12 +868,17 @@ class MailroomLedger:
         proposal: dict[str, Any],
         *,
         actor: str = "draft-agent",
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         return self.transition(
             mail_item_id, MailState.DRAFT_PROPOSED, actor=actor,
-            expected_states=[MailState.DRAFT_REQUESTED, MailState.REVISION_REQUESTED],
+            expected_states=[MailState.DRAFTING],
+            expected_version=expected_version,
             patch={"proposal_json": _json(proposal), "last_error": None},
-            metadata={"proposal_keys": sorted(proposal)},
+            metadata={
+                "proposal_keys": sorted(proposal),
+                "draft_provenance": proposal.get("_mailroom_provenance"),
+            },
         )
 
     def attach_card(

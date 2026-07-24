@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -14,12 +15,23 @@ from mailroom.dispatcher import (
     _extract_proposal,
     _format_card,
     _format_review_card,
+    _workflow_context_violations,
     format_revision_prompt,
 )
-from mailroom.drafting_policy import DraftingPolicy
 from mailroom.ledger import MailroomLedger
 from mailroom.models import IncomingMessage, MailState, RouteDecision
 from mailroom.reply_guard import SentReply
+
+
+def workflow_checks():
+    return {
+        "email_workflow": "used",
+        "calendar": {
+            "status": "not_needed",
+            "checked_at": None,
+            "sources_checked": 0,
+        },
+    }
 
 
 class FakeRunner:
@@ -28,7 +40,12 @@ class FakeRunner:
 
     def draft(self, owner, dossier):
         self.calls.append((owner, dossier))
-        return {"reply_text": "Thanks, I will review this.", "reply_all": "auto", "rationale": "Acknowledges."}
+        return {
+            "reply_text": "Thanks, I will review this.",
+            "reply_all": "auto",
+            "rationale": "Acknowledges.",
+            "context_checks": workflow_checks(),
+        }
 
 
 class SequenceRunner(FakeRunner):
@@ -38,7 +55,10 @@ class SequenceRunner(FakeRunner):
 
     def draft(self, owner, dossier):
         self.calls.append((owner, dossier))
-        return dict(self.proposals.pop(0))
+        proposal = dict(self.proposals.pop(0))
+        if proposal.get("decision") != "no_reply":
+            proposal.setdefault("context_checks", workflow_checks())
+        return proposal
 
 
 class FakeNotifier:
@@ -108,23 +128,6 @@ class FakeAttachmentReader:
 
 class DispatcherTests(unittest.TestCase):
     def setUp(self):
-        self.policy = DraftingPolicy.from_text("""---
-name: email-drafting
-description: Test policy
----
-## 5. Voice & the non-negotiables
-<!-- mailroom-policy-version: 1 -->
-<!-- mailroom-validator: opening-em-dash -->
-- Never use an em dash in an opening.
-<!-- mailroom-validator: recipient-first-name -->
-- Never guess a recipient's first name.
-## 6. The loop
-Draft and review.
-""")
-        self.policy_patch = mock.patch(
-            "mailroom.dispatcher.DraftingPolicy.load", return_value=self.policy,
-        )
-        self.policy_patch.start()
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = MailroomLedger(Path(self.temp.name) / "mailroom.db")
         msg = IncomingMessage(
@@ -158,6 +161,7 @@ Draft and review.
 
     def test_openclaw_runner_preserves_gateway_claude_cli_session_contract(self):
         payload = {
+            "runId": "run-123",
             "payloads": [
                 {
                     "text": (
@@ -166,17 +170,41 @@ Draft and review.
                         '"rationale":"Acknowledges."}'
                     )
                 }
-            ]
+            ],
+            "meta": {"agentMeta": {"sessionId": "session-123"}},
         }
-        completed = subprocess.CompletedProcess(
+        agent_completed = subprocess.CompletedProcess(
             [], 0, stdout=json.dumps(payload), stderr=""
         )
+        audit_completed = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"events": [
+                {
+                    "eventType": "agent_run", "action": "agent.run.finished",
+                    "status": "succeeded", "runId": "run-123",
+                    "agentId": "primary", "sessionKey": "agent:primary:main",
+                    "sessionId": "session-123",
+                },
+                {
+                    "eventType": "tool_action", "action": "tool.action.finished",
+                    "status": "succeeded", "runId": "run-123",
+                    "agentId": "primary", "sessionKey": "agent:primary:main",
+                    "toolName": "Bash",
+                },
+                {
+                    "eventType": "tool_action", "action": "tool.action.finished",
+                    "status": "failed", "runId": "run-123",
+                    "agentId": "primary", "sessionKey": "agent:primary:main",
+                    "toolName": "Read",
+                },
+            ]}), stderr="",
+        )
         with mock.patch(
-            "mailroom.dispatcher.subprocess.run", return_value=completed
+            "mailroom.dispatcher.subprocess.run",
+            side_effect=[agent_completed, audit_completed],
         ) as run:
             proposal = OpenClawAgentRunner().draft("primary", "dossier")
 
-        argv = run.call_args.args[0]
+        argv = run.call_args_list[0].args[0]
         self.assertEqual(proposal["reply_text"], "Thanks.")
         self.assertIn("agent", argv)
         self.assertEqual(argv[argv.index("--agent") + 1], "primary")
@@ -185,7 +213,102 @@ Draft and review.
         )
         self.assertNotIn("--local", argv)
         self.assertNotIn("--model", argv)
-        self.assertNotIn("env", run.call_args.kwargs)
+        self.assertNotIn("env", run.call_args_list[0].kwargs)
+        self.assertEqual(
+            proposal["_mailroom_provenance"],
+            {
+                "schema_version": 1,
+                "agent_id": "primary",
+                "session_key": "agent:primary:main",
+                "run_id": "run-123",
+                "session_id": "session-123",
+                "audit_status": "complete",
+                "tool_names": ["Bash", "Read"],
+                "failed_tool_names": ["Read"],
+            },
+        )
+
+    def test_runner_paginates_and_rejects_cross_session_audit_events(self):
+        payload = {
+            "runId": "run-123",
+            "payloads": [{"text": (
+                'MAILROOM_DRAFT_JSON\n{"reply_text":"Thanks.",'
+                '"reply_all":"auto","rationale":"Acknowledges."}'
+            )}],
+        }
+        agent = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+        page_one = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "events": [{
+                "eventType": "agent_run", "action": "agent.run.finished",
+                "runId": "run-123", "agentId": "other",
+                "sessionKey": "agent:other:main",
+            }],
+            "nextCursor": "cursor-2",
+        }), stderr="")
+        page_two = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "events": [
+                {
+                    "eventType": "agent_run", "action": "agent.run.finished",
+                    "runId": "run-123", "agentId": "primary",
+                    "sessionKey": "agent:primary:main", "sessionId": "session-123",
+                },
+                {
+                    "eventType": "tool_action", "action": "tool.action.finished",
+                    "status": "succeeded", "runId": "run-123",
+                    "agentId": "primary", "sessionKey": "agent:primary:main",
+                    "toolName": "Bash",
+                },
+                {
+                    "eventType": "tool_action", "action": "tool.action.finished",
+                    "status": "succeeded", "runId": "run-123",
+                    "agentId": "other", "sessionKey": "agent:other:main",
+                    "toolName": "Injected",
+                },
+            ],
+        }), stderr="")
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run",
+            side_effect=[agent, page_one, page_two],
+        ) as run:
+            proposal = OpenClawAgentRunner().draft("primary", "dossier")
+        provenance = proposal["_mailroom_provenance"]
+        self.assertEqual(provenance["audit_status"], "complete")
+        self.assertEqual(provenance["tool_names"], ["Bash"])
+        self.assertIn("--cursor", run.call_args_list[2].args[0])
+
+    def test_runner_records_audit_failure_without_blocking_draft(self):
+        payload = {
+            "runId": "run-123",
+            "payloads": [{"text": (
+                'MAILROOM_DRAFT_JSON\n{"reply_text":"Thanks.",'
+                '"reply_all":"auto","rationale":"Acknowledges.",'
+                '"_mailroom_provenance":{"audit_status":"forged"}}'
+            )}],
+        }
+        agent = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+        audit = subprocess.CompletedProcess([], 1, stdout="", stderr="audit offline")
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run", side_effect=[agent, audit],
+        ):
+            proposal = OpenClawAgentRunner().draft("primary", "dossier")
+        provenance = proposal["_mailroom_provenance"]
+        self.assertEqual(provenance["audit_status"], "unavailable")
+        self.assertEqual(provenance["audit_error"], "audit offline")
+        self.assertNotEqual(provenance["audit_status"], "forged")
+
+    def test_runner_without_run_id_does_not_query_audit(self):
+        payload = {"payloads": [{"text": (
+            'MAILROOM_DRAFT_JSON\n{"reply_text":"Thanks.","reply_all":"auto"}'
+        )}]}
+        agent = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run", return_value=agent,
+        ) as run:
+            proposal = OpenClawAgentRunner().draft("primary", "dossier")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            proposal["_mailroom_provenance"]["audit_status"], "run_id_unavailable",
+        )
 
     def dispatcher(self, runner, notifier=None, **kwargs):
         return DraftDispatcher(
@@ -195,7 +318,6 @@ Draft and review.
 
     def tearDown(self):
         self.temp.cleanup()
-        self.policy_patch.stop()
 
     def test_drafts_in_main_session_contract_and_attaches_card(self):
         runner = FakeRunner()
@@ -211,11 +333,46 @@ Draft and review.
         self.assertEqual(item["card_message_id"], "99")
         self.assertEqual(item["run_mode"], "production")
         proposal = json.loads(item["proposal_json"])
-        audit = proposal["_mailroom_policy"]
-        self.assertEqual(audit["name"], "email-drafting")
+        audit = proposal["_mailroom_quality"]
+        self.assertEqual(audit["name"], "mailroom-draft-quality")
         self.assertEqual(audit["attempts"], 1)
-        self.assertEqual(len(audit["skill_sha256"]), 64)
-        self.assertIn("AUTHORITATIVE EMAIL-DRAFTING CONTRACT", runner.calls[0][1])
+        self.assertNotIn("email-drafting", runner.calls[0][1])
+        self.assertNotIn("email-management", runner.calls[0][1])
+        self.assertIn("configured workspace instructions and email workflow", runner.calls[0][1])
+        self.assertIn("context_checks", runner.calls[0][1])
+        self.assertIn("Workflow checks: email=used", notifier.calls[0]["text"])
+
+    def test_overlapping_cycle_cannot_redraft_an_active_lease(self):
+        nested_runner = FakeRunner()
+        nested_notifier = FakeNotifier()
+
+        class OverlapRunner(FakeRunner):
+            def draft(inner_self, owner, dossier):
+                nested = self.dispatcher(nested_runner, nested_notifier).run()
+                self.assertEqual((nested.drafted, nested.errors), (0, 0))
+                return super().draft(owner, dossier)
+
+        outer_dispatcher = self.dispatcher(OverlapRunner(), FakeNotifier())
+        summary = outer_dispatcher.run()
+        self.assertEqual((summary.drafted, summary.errors), (1, 0))
+        self.assertEqual(nested_runner.calls, [])
+
+    def test_expired_drafting_lease_is_recovered_and_retried(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        with self.ledger.transaction() as conn:
+            conn.execute(
+                "UPDATE mail_items SET updated_at = ? WHERE mail_item_id = ?",
+                ("2000-01-01T00:00:00+00:00", item["mail_item_id"]),
+            )
+        summary = self.dispatcher(
+            FakeRunner(), drafting_lease_seconds=1,
+        ).run()
+        self.assertEqual((summary.drafted, summary.errors), (1, 0))
+        self.assertEqual(
+            self.ledger.get(item["mail_item_id"])["state"],
+            MailState.DRAFT_PROPOSED.value,
+        )
 
     def test_gathers_conversation_before_drafting(self):
         runner = FakeRunner()
@@ -260,11 +417,11 @@ Draft and review.
         summary = self.dispatcher(runner, notifier).run()
         self.assertEqual((summary.drafted, summary.cards_sent, summary.errors), (1, 1, 0))
         self.assertEqual(len(runner.calls), 2)
-        self.assertIn("POLICY VALIDATION FAILED", runner.calls[1][1])
+        self.assertIn("MAILROOM QUALITY CHECK FAILED", runner.calls[1][1])
         self.assertIn("opening-em-dash", runner.calls[1][1])
         proposal = json.loads(self.ledger.get(self.item["mail_item_id"])["proposal_json"])
-        self.assertEqual(proposal["_mailroom_policy"]["attempts"], 2)
-        self.assertTrue(proposal["_mailroom_policy"]["corrected_violations"])
+        self.assertEqual(proposal["_mailroom_quality"]["attempts"], 2)
+        self.assertTrue(proposal["_mailroom_quality"]["corrected_violations"])
 
     def test_policy_violation_after_retry_fails_closed(self):
         runner = SequenceRunner([
@@ -276,11 +433,106 @@ Draft and review.
         self.assertEqual((summary.drafted, summary.cards_sent, summary.errors), (0, 0, 1))
         item = self.ledger.get(self.item["mail_item_id"])
         self.assertEqual(item["state"], MailState.ERROR.value)
-        self.assertIn("policy after retry", item["last_error"])
+        self.assertIn("quality checks after retry", item["last_error"])
         self.assertEqual(notifier.calls, [])
+
+    def test_availability_request_retries_until_workflow_and_reply_are_complete(self):
+        with self.ledger.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE mail_items
+                SET subject = ?, body_preview = ?, body_content = ?
+                WHERE mail_item_id = ?
+                """,
+                (
+                    "Meeting availability",
+                    "What is your availability over the next two weeks?",
+                    "What is your availability over the next two weeks?",
+                    self.item["mail_item_id"],
+                ),
+            )
+        checked_at = datetime.now(timezone.utc).isoformat()
+        runner = SequenceRunner([
+            {
+                "reply_text": "What times work for you?",
+                "reply_all": "auto",
+                "context_checks": workflow_checks(),
+            },
+            {
+                "reply_text": (
+                    "Hi Person,\n\nTuesday, July 28 at 1:00 PM ET or "
+                    "Wednesday, July 29 at 10:00 AM ET both work."
+                ),
+                "reply_all": "auto",
+                "context_checks": {
+                    "email_workflow": "used",
+                    "calendar": {
+                        "status": "complete",
+                        "checked_at": checked_at,
+                        "sources_checked": 6,
+                    },
+                },
+            },
+        ])
+        summary = self.dispatcher(runner).run()
+        self.assertEqual((summary.drafted, summary.errors), (1, 0))
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("calendar-check-incomplete", runner.calls[1][1])
+        proposal = json.loads(
+            self.ledger.get(self.item["mail_item_id"])["proposal_json"]
+        )
+        self.assertEqual(
+            proposal["context_checks"]["calendar"]["sources_checked"], 6,
+        )
+
+    def test_workflow_checks_reject_missing_email_workflow_and_bad_calendar_evidence(self):
+        item = {
+            "subject": "Availability",
+            "body_content": "Please provide some times next week.",
+        }
+        current = datetime(2026, 7, 24, 16, 0, tzinfo=timezone.utc)
+        proposal = {
+            "decision": "draft",
+            "reply_text": "Monday, July 27 at 1:00 PM ET works.",
+            "context_checks": {
+                "email_workflow": "skipped",
+                "calendar": {
+                    "status": "complete",
+                    "checked_at": (current - timedelta(hours=3)).isoformat(),
+                    "sources_checked": 0,
+                },
+            },
+        }
+        violations = _workflow_context_violations(item, proposal, now=current)
+        self.assertTrue(any("email-workflow-not-used" in value for value in violations))
+        self.assertTrue(any("calendar-sources-invalid" in value for value in violations))
+        self.assertTrue(any("calendar-check-stale" in value for value in violations))
+
+    def test_workflow_checks_accept_fresh_complete_six_calendar_evidence(self):
+        current = datetime(2026, 7, 24, 16, 0, tzinfo=timezone.utc)
+        item = {
+            "subject": "Availability",
+            "body_content": "When are you available next week?",
+        }
+        proposal = {
+            "decision": "draft",
+            "reply_text": "Monday, July 27 at 1:00 PM ET works.",
+            "context_checks": {
+                "email_workflow": "used",
+                "calendar": {
+                    "status": "complete",
+                    "checked_at": current.isoformat(),
+                    "sources_checked": 6,
+                },
+            },
+        }
+        self.assertEqual(
+            _workflow_context_violations(item, proposal, now=current), [],
+        )
 
     def test_revision_uses_same_policy_retry_and_preserves_instructions(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -300,12 +552,13 @@ Draft and review.
         self.assertEqual(result["state"], MailState.DRAFT_PROPOSED.value)
         self.assertEqual(len(runner.calls), 2)
         self.assertIn("OPERATOR REVISION INSTRUCTIONS\nMake it shorter", runner.calls[0][1])
-        self.assertIn("POLICY VALIDATION FAILED", runner.calls[1][1])
+        self.assertIn("MAILROOM QUALITY CHECK FAILED", runner.calls[1][1])
         proposal = json.loads(result["proposal_json"])
-        self.assertEqual(proposal["_mailroom_policy"]["attempts"], 2)
+        self.assertEqual(proposal["_mailroom_quality"]["attempts"], 2)
 
     def test_revision_notification_failure_leaves_proposal_retriable(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -332,6 +585,7 @@ Draft and review.
 
     def test_revision_rejects_a_chat_that_does_not_match_the_card(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -357,6 +611,7 @@ Draft and review.
 
     def test_revision_requires_chat_binding_from_direct_callers(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -389,6 +644,7 @@ Draft and review.
 
     def test_revision_no_reply_drops_cleanly_without_creating_blank_card(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -414,6 +670,7 @@ Draft and review.
 
     def test_revision_policy_failure_moves_item_to_error(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -426,14 +683,14 @@ Draft and review.
             {"reply_text": "David, revised.", "reply_all": "auto"},
             {"reply_text": "David, revised again.", "reply_all": "auto"},
         ])
-        with self.assertRaisesRegex(ValueError, "policy after retry"):
+        with self.assertRaisesRegex(ValueError, "quality checks after retry"):
             self.dispatcher(runner).revise(
                 item["callback_token"], "Make it shorter",
                 account_id="primary", chat_id="chat",
             )
         failed = self.ledger.get(item["mail_item_id"])
         self.assertEqual(failed["state"], MailState.ERROR.value)
-        self.assertIn("policy after retry", failed["last_error"])
+        self.assertIn("quality checks after retry", failed["last_error"])
 
     def test_attachment_names_and_original_email_are_in_dossier_and_card(self):
         attached = IncomingMessage(
@@ -688,6 +945,7 @@ Draft and review.
 
     def test_sent_reply_suppresses_requested_revision(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
@@ -712,6 +970,7 @@ Draft and review.
 
     def test_revision_guard_failure_stays_pending_and_records_concise_error(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
         item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
         item = self.ledger.attach_card(
             item["mail_item_id"], channel="telegram", account_id="primary",
