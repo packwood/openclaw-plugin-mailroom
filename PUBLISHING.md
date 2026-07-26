@@ -23,9 +23,9 @@ is safe for public disclosure.
    ```
 
 8. Push the tag, then dispatch the protected `release.yml` workflow against
-   that tag. The workflow reruns verification, publishes the exact verified
-   npm-pack tarball through ClawHub trusted publishing, and creates the GitHub
-   release.
+   that tag. The workflow reruns repository verification, delegates packaging
+   and trusted publication to ClawHub's pinned official reusable workflow, and
+   creates the GitHub release.
 
 The initial release must be published once with an authenticated ClawHub CLI.
 Afterward, configure the repository workflow as the package's trusted publisher:
@@ -37,6 +37,9 @@ clawhub package trusted-publisher set @packwood/mailroom \
 ```
 
 Manual publication after trusted publishing is configured is reserved for
-recovery and requires an explicit override reason.
+recovery. Build the archive with `npm pack --ignore-scripts`, verify it with
+`clawhub package publish <archive> --family code-plugin --dry-run`, and provide
+an explicit `--manual-override-reason` on the real publish. Record the failed
+workflow run and the archive digest in the release notes.
 
 New ClawHub releases may remain hidden until review and verification complete.

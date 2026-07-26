@@ -5,6 +5,12 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+### Changed
+
+- Align the development and CI toolchain with OpenClaw 2026.7.2-beta.4.
+- Delegate ClawHub publication to its pinned official reusable workflow after
+  repository tests and package verification pass.
+
 ## [0.1.7] - 2026-07-26
 
 ### Added

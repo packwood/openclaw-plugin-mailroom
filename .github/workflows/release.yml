@@ -7,56 +7,44 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: npm ci
+      - run: npm audit --omit=dev
       - name: Verify tag matches package version
         run: |
           test "$GITHUB_REF_TYPE" = "tag"
           test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
       - run: npm run test:all
       - run: npm run verify:package
-      - run: npm install --global clawhub@0.23.1
-      - run: clawhub package validate .
-      - name: Build exact release artifact
-        id: artifact
-        run: |
-          artifact="$(npm pack --ignore-scripts --silent | tail -n 1)"
-          test -n "$artifact"
-          test -f "$artifact"
-          tar -tzf "$artifact" | grep -qx 'package/dist/index.js'
-          echo "path=$artifact" >> "$GITHUB_OUTPUT"
-      - name: Validate exact release artifact
-        run: >-
-          clawhub package publish "${{ steps.artifact.outputs.path }}"
-          --family code-plugin
-          --source-repo "$GITHUB_REPOSITORY"
-          --source-commit "$GITHUB_SHA"
-          --source-ref "$GITHUB_REF"
-          --tags latest
-          --dry-run
-          --json
-      - name: Publish exact release artifact
-        run: >-
-          clawhub package publish "${{ steps.artifact.outputs.path }}"
-          --family code-plugin
-          --source-repo "$GITHUB_REPOSITORY"
-          --source-commit "$GITHUB_SHA"
-          --source-ref "$GITHUB_REF"
-          --tags latest
-          --json
+
+  publish:
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@ecf09b868a986751137f4272283f84967a16c765 # v0.12.0
+    with:
+      dry_run: false
+      source: ${{ github.repository }}
+      ref: ${{ github.sha }}
+      source_repo: ${{ github.repository }}
+      source_commit: ${{ github.sha }}
+      source_ref: ${{ github.ref }}
+      tags: latest
+    secrets:
+      clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}
 
   github-release:
     needs: publish
