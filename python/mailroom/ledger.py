@@ -1030,6 +1030,7 @@ class MailroomLedger:
         state: MailState | None = None,
         run_mode: str | None = None,
         mailbox: str | None = None,
+        card_attached: bool | None = None,
         limit: int = 50,
         order_by_priority: bool = False,
     ) -> list[dict[str, Any]]:
@@ -1047,6 +1048,10 @@ class MailroomLedger:
             if mailbox:
                 clauses.append("mailbox = ?")
                 values.append(mailbox)
+            if card_attached is True:
+                clauses.append("card_message_id IS NOT NULL")
+            elif card_attached is False:
+                clauses.append("card_message_id IS NULL")
             where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
             values.append(limit)
             order = (

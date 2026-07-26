@@ -167,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     cycle.add_argument("--telegram-chat-id", required=True)
+    cycle.add_argument(
+        "--routing-review-telegram-account-id", default="default",
+        help="Telegram account for ambiguous routing-review cards",
+    )
+    cycle.add_argument(
+        "--routing-review-agent-id", default="main",
+        help="OpenClaw agent that owns ambiguous routing review",
+    )
     cycle.add_argument("--triage-model", default=DEFAULT_TRIAGE_MODEL)
     _add_profile_routing_arguments(cycle)
     catchup = sub.add_parser(
@@ -204,6 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     dispatch.add_argument("--telegram-chat-id", required=True)
+    dispatch.add_argument(
+        "--routing-review-telegram-account-id", default="default",
+        help="Telegram account for ambiguous routing-review cards",
+    )
+    dispatch.add_argument(
+        "--routing-review-agent-id", default="main",
+        help="OpenClaw agent that owns ambiguous routing review",
+    )
     dispatch.add_argument("--profiles-dir", default=str(DEFAULT_PROFILE_DIR))
     reconcile = sub.add_parser(
         "reconcile",
@@ -519,6 +535,8 @@ def main(argv: list[str] | None = None) -> int:
                 OpenClawAgentRunner(),
                 TelegramCardNotifier(),
                 telegram_chat_id=args.telegram_chat_id,
+                review_agent_id=args.routing_review_agent_id,
+                review_account_id=args.routing_review_telegram_account_id,
                 review_owners=_review_owners(profiles, router),
                 reply_checker=MatonSentReplyChecker(
                     connection_id=connection, api_key=api_key
@@ -608,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
             OpenClawAgentRunner(),
             TelegramCardNotifier(),
             telegram_chat_id=args.telegram_chat_id,
+            review_agent_id=args.routing_review_agent_id,
+            review_account_id=args.routing_review_telegram_account_id,
             review_owners=_review_owners(profiles, router),
             reply_checker=MatonSentReplyChecker(
                 connection_id=connection, api_key=api_key

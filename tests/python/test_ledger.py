@@ -261,6 +261,40 @@ class LedgerTests(unittest.TestCase):
         )
         self.assertEqual([row["priority"] for row in rows], ["P0", "P3"])
 
+    def test_list_items_can_select_only_rows_without_cards_before_limit(self):
+        first, _ = self.ledger.upsert_message(message(), run_mode="production")
+        first = self.ledger.route(first["mail_item_id"], RouteDecision(
+            draft_owner=None, watchers=(), confidence=0.5, reasons=("first",),
+            priority=Priority.P0, disposition=Disposition.REVIEW_REQUIRED,
+            outcome="BORDERLINE",
+        ))
+        self.ledger.attach_card(
+            first["mail_item_id"], channel="telegram", account_id="default",
+            chat_id="123456789", message_id="42",
+        )
+        second_message = message(
+            provider_message_id="graph-unnotified",
+            immutable_id="immutable-unnotified",
+            internet_message_id="<unnotified@example.com>",
+            conversation_id="unnotified",
+        )
+        second, _ = self.ledger.upsert_message(
+            second_message, run_mode="production",
+        )
+        second = self.ledger.route(second["mail_item_id"], RouteDecision(
+            draft_owner=None, watchers=(), confidence=0.5, reasons=("second",),
+            priority=Priority.P3, disposition=Disposition.REVIEW_REQUIRED,
+            outcome="BORDERLINE",
+        ))
+        rows = self.ledger.list_items(
+            state=MailState.ROUTING_REVIEW,
+            run_mode="production",
+            card_attached=False,
+            limit=1,
+            order_by_priority=True,
+        )
+        self.assertEqual([row["mail_item_id"] for row in rows], [second["mail_item_id"]])
+
     def test_draft_proposal_and_card_are_restart_safe(self):
         item, _ = self.ledger.upsert_message(message(), run_mode="production")
         routed = self.ledger.route(item["mail_item_id"], RouteDecision(

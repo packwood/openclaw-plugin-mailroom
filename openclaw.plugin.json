@@ -24,6 +24,18 @@
         "minLength": 1,
         "description": "Telegram chat authorized to approve Mailroom actions."
       },
+      "routingReviewTelegramAccountId": {
+        "type": "string",
+        "minLength": 1,
+        "default": "default",
+        "description": "Telegram account used only for ambiguous routing-review cards. Set to Orchestrator's Telegram account; defaults to default."
+      },
+      "routingReviewAgentId": {
+        "type": "string",
+        "minLength": 1,
+        "default": "main",
+        "description": "OpenClaw agent whose owner cards use routingReviewTelegramAccountId. Its Telegram account binding must route that account to the same agent."
+      },
       "reviewOwners": {
         "type": "array",
         "items": {"type": "string"},

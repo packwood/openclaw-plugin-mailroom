@@ -19,7 +19,7 @@ from mailroom.dispatcher import (
     format_revision_prompt,
 )
 from mailroom.ledger import MailroomLedger
-from mailroom.models import IncomingMessage, MailState, RouteDecision
+from mailroom.models import IncomingMessage, MailState, Priority, RouteDecision
 from mailroom.reply_guard import SentReply
 
 
@@ -374,6 +374,61 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(notifier.calls[0]["account_id"], "default")
         item = self.ledger.get(self.item["mail_item_id"])
         self.assertEqual(item["card_account_id"], "default")
+
+    def test_review_owner_card_uses_review_account_without_channel_discovery(self):
+        with self.ledger.transaction() as conn:
+            conn.execute(
+                "UPDATE mail_items SET draft_owner = 'coordinator' WHERE mail_item_id = ?",
+                (self.item["mail_item_id"],),
+            )
+        notifier = FakeNotifier()
+        summary = self.dispatcher(
+            FakeRunner(), notifier, review_agent_id="coordinator",
+            review_account_id="coordinator-bot",
+        ).run()
+        self.assertEqual((summary.drafted, summary.cards_sent), (1, 1))
+        self.assertEqual(notifier.calls[0]["account_id"], "coordinator-bot")
+        item = self.ledger.get(self.item["mail_item_id"])
+        self.assertEqual(item["card_account_id"], "coordinator-bot")
+
+    def test_unnotified_draft_is_not_starved_by_carded_higher_priority_rows(self):
+        for index in range(25):
+            incoming = IncomingMessage(
+                mailbox="operator@example.com",
+                provider_message_id=f"carded-{index}",
+                immutable_id=f"immutable-carded-{index}",
+                internet_message_id=f"<carded-{index}@example.com>",
+                conversation_id=f"carded-{index}",
+                received_at="2026-07-12T12:00:00Z",
+                sender_email="person@example.com",
+                sender_name="Person",
+                subject=f"Carded {index}",
+                body_preview="Existing proposal",
+            )
+            item, _ = self.ledger.upsert_message(
+                incoming, run_mode="production",
+            )
+            item = self.ledger.route(item["mail_item_id"], RouteDecision(
+                draft_owner="primary", watchers=(), confidence=0.9,
+                reasons=("existing",), priority=Priority.P0, outcome="ROUTED",
+            ))
+            item = self.ledger.request_draft(item["mail_item_id"])
+            item = self.ledger.start_drafting(item["mail_item_id"])
+            item = self.ledger.propose_draft(item["mail_item_id"], {
+                "reply_text": "Existing",
+                "reply_all": "auto",
+                "rationale": "Existing",
+                "context_checks": workflow_checks(),
+            })
+            self.ledger.attach_card(
+                item["mail_item_id"], channel="telegram",
+                account_id="primary", chat_id="chat",
+                message_id=f"message-{index}",
+            )
+        notifier = FakeNotifier()
+        summary = self.dispatcher(FakeRunner(), notifier).run(limit=20)
+        self.assertEqual(summary.cards_sent, 1)
+        self.assertEqual(notifier.calls[0]["account_id"], "primary")
 
     def test_overlapping_cycle_cannot_redraft_an_active_lease(self):
         nested_runner = FakeRunner()

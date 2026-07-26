@@ -118,6 +118,8 @@ Optional settings:
 | `connectionsPath` | Override `~/.openclaw/shared/connections.json` |
 | `signaturesPath` | Directory containing `<account>.html` signatures |
 | `accounts` | Friendly account ID to mailbox-address map |
+| `routingReviewTelegramAccountId` | Telegram account for ambiguous routing-review cards; set this to Orchestrator's account (`default` in a standard OpenClaw setup) |
+| `routingReviewAgentId` | Agent whose owner cards share the routing-review Telegram account (`main` for Orchestrator); OpenClaw must bind that Telegram account to the same agent |
 | `routingOwnerMode` | `all` (default) makes every profiled/discovered agent a routing owner; `selected` limits routing to `reviewOwners` |
 | `reviewOwners` | Agent IDs used in `selected` mode |
 | `profilesPath` | Effective responsibility-profile file; must end in `current.json` and defaults under `~/.openclaw/mailroom/` |

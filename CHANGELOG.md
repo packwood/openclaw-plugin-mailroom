@@ -5,6 +5,21 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-26
+
+### Added
+
+- Configure the agent and Telegram account used for ambiguous routing reviews,
+  with Orchestrator-compatible `main` and `default` defaults.
+
+### Fixed
+
+- Prevent already-notified routing reviews and draft approvals from consuming
+  the dispatch page limit and permanently starving records that have no
+  Telegram card.
+- Route Orchestrator-owned approval cards through the configured routing-review
+  Telegram account even when Telegram account discovery is unavailable.
+
 ## [0.1.6] - 2026-07-24
 
 ### Fixed
