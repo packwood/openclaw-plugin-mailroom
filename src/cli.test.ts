@@ -28,12 +28,16 @@ describe("Mailroom engine CLI forwarding", () => {
       dbPath: "/state/mailroom.db",
       profilesPath: "/state/profiles/current.json",
       telegramChatId: "private-chat",
+      routingReviewAgentId: "main",
+      routingReviewTelegramAccountId: "default",
       accounts: { work: "operator@example.com" },
     }, "cycle", ["--account", "work"])).toEqual([
       "--db", "/state/mailroom.db", "cycle",
       "--account", "operator@example.com",
       "--profiles-dir", "/state/profiles",
       "--telegram-chat-id", "private-chat",
+      "--routing-review-agent-id", "main",
+      "--routing-review-telegram-account-id", "default",
     ]);
   });
 
@@ -43,10 +47,15 @@ describe("Mailroom engine CLI forwarding", () => {
       accounts: { work: "operator@example.com" },
     }, "dispatch", [
       "--account=other@example.com", "--telegram-chat-id", "explicit-chat",
+      "--routing-review-agent-id=coordinator",
+      "--routing-review-telegram-account-id", "orchestrator",
       "--profiles-dir=/explicit",
     ])).toEqual([
       "dispatch", "--account=other@example.com",
-      "--telegram-chat-id", "explicit-chat", "--profiles-dir=/explicit",
+      "--telegram-chat-id", "explicit-chat",
+      "--routing-review-agent-id=coordinator",
+      "--routing-review-telegram-account-id", "orchestrator",
+      "--profiles-dir=/explicit",
     ]);
   });
 

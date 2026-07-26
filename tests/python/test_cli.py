@@ -498,10 +498,12 @@ class CliTests(unittest.TestCase):
 
     def test_cycle_keeps_dispatch_and_reconciliation_alive_without_profiles(self):
         calls = []
+        dispatcher_kwargs = []
 
         class FakeDispatcher:
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, *_args, **kwargs):
                 calls.append("dispatcher-init")
+                dispatcher_kwargs.append(kwargs)
 
             def run(self):
                 calls.append("dispatch-run")
@@ -554,6 +556,10 @@ class CliTests(unittest.TestCase):
                     "operator@example.com",
                     "--telegram-chat-id",
                     "chat",
+                    "--routing-review-agent-id",
+                    "coordinator",
+                    "--routing-review-telegram-account-id",
+                    "coordinator-bot",
                 ]
             )
         self.assertEqual(result, 2)
@@ -565,6 +571,12 @@ class CliTests(unittest.TestCase):
                 "reconciler-init",
                 "reconcile-run",
             ],
+        )
+        self.assertEqual(
+            dispatcher_kwargs[0]["review_agent_id"], "coordinator",
+        )
+        self.assertEqual(
+            dispatcher_kwargs[0]["review_account_id"], "coordinator-bot",
         )
 
     def test_shadow_returns_nonzero_when_semantic_triage_unavailable(self):

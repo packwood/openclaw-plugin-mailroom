@@ -27,6 +27,8 @@ type Config = {
   pythonPath: string;
   pythonExecutable?: string;
   telegramChatId: string;
+  routingReviewAgentId: string;
+  routingReviewTelegramAccountId: string;
   reviewOwners: string[];
   routingOwnerMode?: RoutingOwnerMode;
   profilesPath?: string;
@@ -121,6 +123,10 @@ function resolveConfig(raw: any): Config {
     pythonPath: raw?.pythonPath || fileURLToPath(new URL("../python", import.meta.url)),
     pythonExecutable: String(raw?.pythonExecutable || "python3"),
     telegramChatId,
+    routingReviewAgentId: String(raw?.routingReviewAgentId || "main"),
+    routingReviewTelegramAccountId: String(
+      raw?.routingReviewTelegramAccountId || "default",
+    ),
     reviewOwners,
     routingOwnerMode,
     profilesPath,

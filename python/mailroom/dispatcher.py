@@ -301,6 +301,7 @@ class DraftDispatcher:
         notifier: CardNotifier,
         *,
         telegram_chat_id: str,
+        review_agent_id: str = "main",
         review_account_id: str = "default",
         review_owners: tuple[str, ...] = (),
         reply_checker: ReplyChecker | None = None,
@@ -314,6 +315,7 @@ class DraftDispatcher:
         self.runner = runner
         self.notifier = notifier
         self.telegram_chat_id = telegram_chat_id
+        self.review_agent_id = review_agent_id
         self.review_account_id = review_account_id
         self.review_owners = review_owners
         self.reply_checker = reply_checker
@@ -332,7 +334,8 @@ class DraftDispatcher:
 
         reviews = self.ledger.list_items(
             state=MailState.ROUTING_REVIEW, run_mode="production",
-            mailbox=self.mailbox, limit=limit, order_by_priority=True,
+            mailbox=self.mailbox, card_attached=False,
+            limit=limit, order_by_priority=True,
         )
         for item in reviews:
             if item.get("card_message_id"):
@@ -437,7 +440,8 @@ class DraftDispatcher:
 
         proposed = self.ledger.list_items(
             state=MailState.DRAFT_PROPOSED, run_mode="production",
-            mailbox=self.mailbox, limit=limit, order_by_priority=True,
+            mailbox=self.mailbox, card_attached=False,
+            limit=limit, order_by_priority=True,
         )
         for item in proposed:
             try:
@@ -462,7 +466,8 @@ class DraftDispatcher:
 
         send_approvals = self.ledger.list_items(
             state=MailState.SEND_APPROVAL_PENDING, run_mode="production",
-            mailbox=self.mailbox, limit=limit, order_by_priority=True,
+            mailbox=self.mailbox, card_attached=False,
+            limit=limit, order_by_priority=True,
         )
         for item in send_approvals:
             try:
@@ -521,6 +526,12 @@ class DraftDispatcher:
             )
 
     def _card_account_id(self, owner: str) -> str:
+        # OpenClaw's Orchestrator agent is named "main", while its Telegram
+        # account is conventionally "default". Keep Orchestrator-owned cards
+        # in the same chat as ambiguous routing reviews even when channel
+        # discovery is temporarily unavailable.
+        if owner == self.review_agent_id:
+            return self.review_account_id
         resolver = getattr(self.notifier, "resolve_account_id", None)
         if callable(resolver):
             return str(resolver(owner, self.review_account_id))

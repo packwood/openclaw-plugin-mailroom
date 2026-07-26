@@ -15,6 +15,8 @@ type CliContext = {
     pythonExecutable?: string;
     pythonPath?: string;
     telegramChatId?: string;
+    routingReviewAgentId?: string;
+    routingReviewTelegramAccountId?: string;
     accounts?: Record<string, string>;
   };
 };
@@ -67,6 +69,24 @@ export function buildEngineArgs(
       throw new Error("Mailroom telegramChatId must be configured for this command");
     }
     forwarded.push("--telegram-chat-id", cfg.telegramChatId);
+  }
+  if (
+    ["cycle", "dispatch"].includes(command)
+    && !hasOption(forwarded, "--routing-review-agent-id")
+  ) {
+    forwarded.push(
+      "--routing-review-agent-id",
+      cfg.routingReviewAgentId || "main",
+    );
+  }
+  if (
+    ["cycle", "dispatch"].includes(command)
+    && !hasOption(forwarded, "--routing-review-telegram-account-id")
+  ) {
+    forwarded.push(
+      "--routing-review-telegram-account-id",
+      cfg.routingReviewTelegramAccountId || "default",
+    );
   }
   return [
     ...(cfg.dbPath ? ["--db", cfg.dbPath] : []),
