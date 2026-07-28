@@ -5,6 +5,8 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-28
+
 ### Changed
 
 - Align the development and CI toolchain with OpenClaw 2026.7.2-beta.4.
