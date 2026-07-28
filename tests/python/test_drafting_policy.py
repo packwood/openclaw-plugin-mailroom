@@ -45,7 +45,7 @@ class DraftQualityGateTests(unittest.TestCase):
                 self.assertIn(
                     "placeholder-reply-text",
                     " ".join(policy.violations(
-                        {"reply_text": reply}, sender_name="Ethan Sands",
+                        {"reply_text": reply}, sender_name="Taylor Example",
                     )),
                 )
 

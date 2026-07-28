@@ -105,8 +105,9 @@ class RouterTests(unittest.TestCase):
         router = DeterministicRouter.from_directory(Path(__file__).parents[1] / "rulepacks")
         message = IncomingMessage(
             mailbox="operator@example.com", provider_message_id="recap",
-            conversation_id="recap", received_at=None, sender_email="fred@fireflies.ai",
-            sender_name="Fred", subject="Your meeting recap - Project Redwood",
+            conversation_id="recap", received_at=None,
+            sender_email="automated-recap@fireflies.ai",
+            sender_name="Automated Recap", subject="Your meeting recap - Project Redwood",
             body_preview="Project Redwood discussion recap.",
         )
         self.assertIsNone(router.route(message).draft_owner)
