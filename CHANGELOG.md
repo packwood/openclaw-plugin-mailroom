@@ -5,6 +5,12 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-30
+
+### Fixed
+
+- Correct the loaded plugin display name from `Mailroom Approvals` to `Mailroom`.
+
 ## [0.1.8] - 2026-07-28
 
 ### Changed
