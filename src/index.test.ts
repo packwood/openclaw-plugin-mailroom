@@ -3,11 +3,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import {
+import plugin, {
   formatRevisionPrompt, formatSecondGateText, handleInteractive, handleRevisionCommand,
   handleRevisionReply, invalidInstructionsMessage, revisionFailureMessage,
   routingOwnerCallbackRef, sendFailureState, verifyThreadRoute,
 } from "./index.js";
+
+describe("Mailroom plugin metadata", () => {
+  it("registers the Mailroom runtime display name", () => {
+    expect(plugin.id).toBe("mailroom");
+    expect(plugin.name).toBe("Mailroom");
+  });
+});
 
 const roots: string[] = [];
 

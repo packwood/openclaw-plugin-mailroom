@@ -1453,7 +1453,7 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
 
 const plugin: any = definePluginEntry({
   id: "mailroom",
-  name: "Mailroom Approvals",
+  name: "Mailroom",
   description: "Restart-safe Telegram approval cards for Outlook drafts and sends.",
   register(api: any) {
     const cfg = resolveConfig(api.pluginConfig);
