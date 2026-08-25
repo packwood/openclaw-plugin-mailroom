@@ -21,20 +21,90 @@ from .models import Disposition, MailState
 from .reply_guard import ReplyChecker
 from .router import _current_message_text
 
+_UNSET = object()
+
 
 class DraftRunner(Protocol):
     def draft(self, owner: str, dossier: str) -> dict[str, Any]: ...
 
 
 class CardNotifier(Protocol):
-    def send(self, *, account_id: str, chat_id: str, text: str, token: str) -> str: ...
+    def send(
+        self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None = None,
+    ) -> str: ...
     def send_review(
         self, *, account_id: str, chat_id: str, text: str, token: str,
-        owners: tuple[str, ...],
+        owners: tuple[str, ...], thread_id: str | None = None,
     ) -> str: ...
     def send_send_approval(
         self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None = None,
     ) -> str: ...
+
+
+@dataclass(frozen=True)
+class TelegramDestination:
+    chat_id: str
+    thread_id: str | None = None
+
+
+def parse_telegram_destinations(raw: str | None) -> dict[str, TelegramDestination]:
+    """Parse the plugin's per-owner Telegram destination JSON."""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Mailroom --telegram-destinations is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Mailroom --telegram-destinations must be a JSON object mapping "
+            "OpenClaw agent ids to destinations"
+        )
+    destinations: dict[str, TelegramDestination] = {}
+    for owner, value in payload.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"Mailroom --telegram-destinations[{owner}] must be an object "
+                "with a non-empty chatId"
+            )
+        chat_id = str(value.get("chatId") or "").strip()
+        if not chat_id:
+            raise ValueError(
+                f"Mailroom --telegram-destinations[{owner}] requires a non-empty chatId"
+            )
+        thread_raw = value.get("threadId")
+        if thread_raw is None:
+            thread_id = None
+        else:
+            thread_id = str(thread_raw).strip()
+            if not thread_id:
+                raise ValueError(
+                    f"Mailroom --telegram-destinations[{owner}] threadId must be "
+                    "a non-empty string when set"
+                )
+        destinations[str(owner)] = TelegramDestination(
+            chat_id=chat_id, thread_id=thread_id,
+        )
+    return destinations
+
+
+def resolve_telegram_destination(
+    destinations: dict[str, TelegramDestination],
+    *,
+    owner: str | None,
+    fallback: TelegramDestination,
+    review_agent_id: str,
+) -> TelegramDestination:
+    """Resolve a card destination from draft_owner, else routing-review agent, else fallback."""
+    key = str(owner or "").strip() or review_agent_id
+    match = destinations.get(key) if key else None
+    if match is not None:
+        return match
+    return fallback
 
 
 class OpenClawAgentRunner:
@@ -215,7 +285,10 @@ class TelegramCardNotifier:
             return fallback
         return requested
 
-    def send(self, *, account_id: str, chat_id: str, text: str, token: str) -> str:
+    def send(
+        self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None | object = _UNSET,
+    ) -> str:
         presentation = {
             "blocks": [{
                 "type": "buttons",
@@ -229,11 +302,14 @@ class TelegramCardNotifier:
                 ],
             }],
         }
-        return self._send(account_id=account_id, chat_id=chat_id, text=text, presentation=presentation)
+        return self._send(
+            account_id=account_id, chat_id=chat_id, text=text,
+            presentation=presentation, thread_id=thread_id,
+        )
 
     def send_review(
         self, *, account_id: str, chat_id: str, text: str, token: str,
-        owners: tuple[str, ...],
+        owners: tuple[str, ...], thread_id: str | None | object = _UNSET,
     ) -> str:
         buttons = [
             {
@@ -249,9 +325,11 @@ class TelegramCardNotifier:
         return self._send(
             account_id=account_id, chat_id=chat_id, text=text,
             presentation={"blocks": [{"type": "buttons", "buttons": buttons}]},
+            thread_id=thread_id,
         )
     def send_send_approval(
         self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None | object = _UNSET,
     ) -> str:
         presentation = {"blocks": [{"type": "buttons", "buttons": [
             {"label": "Send", "callback_data": f"mailroom:send.{token}", "style": "success"},
@@ -261,17 +339,24 @@ class TelegramCardNotifier:
             {"label": "New Email Check", "callback_data": f"mailroom:new-email-check.{token}"},
             {"label": "Cancel", "callback_data": f"mailroom:cancel.{token}", "style": "danger"},
         ]}]}
-        return self._send(account_id=account_id, chat_id=chat_id, text=text, presentation=presentation)
+        return self._send(
+            account_id=account_id, chat_id=chat_id, text=text,
+            presentation=presentation, thread_id=thread_id,
+        )
 
     def _send(
         self, *, account_id: str, chat_id: str, text: str, presentation: dict[str, Any],
+        thread_id: str | None | object = _UNSET,
     ) -> str:
         command = [
             self.executable, "message", "send", "--channel", "telegram",
             "--account", account_id, "--target", chat_id,
         ]
-        if self.thread_id:
-            command.extend(["--thread-id", self.thread_id])
+        resolved_thread = self.thread_id if thread_id is _UNSET else (
+            str(thread_id) if thread_id else None
+        )
+        if resolved_thread:
+            command.extend(["--thread-id", resolved_thread])
         command.extend([
             "--message", text, "--presentation", json.dumps(presentation), "--json",
         ])
@@ -307,6 +392,8 @@ class DraftDispatcher:
         notifier: CardNotifier,
         *,
         telegram_chat_id: str,
+        telegram_thread_id: str | None = None,
+        telegram_destinations: dict[str, TelegramDestination] | None = None,
         review_agent_id: str = "main",
         review_account_id: str = "default",
         review_owners: tuple[str, ...] = (),
@@ -321,6 +408,8 @@ class DraftDispatcher:
         self.runner = runner
         self.notifier = notifier
         self.telegram_chat_id = telegram_chat_id
+        self.telegram_thread_id = str(telegram_thread_id) if telegram_thread_id else None
+        self.telegram_destinations = telegram_destinations or {}
         self.review_agent_id = review_agent_id
         self.review_account_id = review_account_id
         self.review_owners = review_owners
@@ -347,14 +436,15 @@ class DraftDispatcher:
             if item.get("card_message_id"):
                 continue
             try:
+                dest = self._card_destination(None)
                 message_id = self.notifier.send_review(
-                    account_id=self.review_account_id, chat_id=self.telegram_chat_id,
+                    account_id=self.review_account_id, chat_id=dest.chat_id,
                     text=_format_review_card(item), token=item["callback_token"],
-                    owners=self.review_owners,
+                    owners=self.review_owners, thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=self.review_account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 review_cards_sent += 1
             except Exception as exc:
@@ -456,13 +546,15 @@ class DraftDispatcher:
                     continue
                 proposal = json.loads(item["proposal_json"])
                 account_id = self._card_account_id(item["draft_owner"])
+                dest = self._card_destination(item.get("draft_owner"))
                 message_id = self.notifier.send(
-                    account_id=account_id, chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=dest.chat_id,
                     text=_format_card(item, proposal), token=item["callback_token"],
+                    thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 cards_sent += 1
             except Exception as exc:
@@ -481,13 +573,15 @@ class DraftDispatcher:
                 if item.get("card_message_id"):
                     continue
                 account_id = self._card_account_id(item["draft_owner"])
+                dest = self._card_destination(item.get("draft_owner"))
                 message_id = self.notifier.send_send_approval(
-                    account_id=account_id, chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=dest.chat_id,
                     text=_format_send_approval(item), token=item["callback_token"],
+                    thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 cards_sent += 1
             except Exception as exc:
@@ -530,6 +624,19 @@ class DraftDispatcher:
                 "UPDATE mail_items SET last_error = ?, updated_at = ? WHERE mail_item_id = ?",
                 (str(exc)[:2000], _utcnow(), mail_item_id),
             )
+
+    def _fallback_destination(self) -> TelegramDestination:
+        return TelegramDestination(
+            chat_id=self.telegram_chat_id, thread_id=self.telegram_thread_id,
+        )
+
+    def _card_destination(self, owner: str | None) -> TelegramDestination:
+        return resolve_telegram_destination(
+            self.telegram_destinations,
+            owner=owner,
+            fallback=self._fallback_destination(),
+            review_agent_id=self.review_agent_id,
+        )
 
     def _card_account_id(self, owner: str) -> str:
         # OpenClaw's Orchestrator agent is named "main", while its Telegram
@@ -626,13 +733,23 @@ class DraftDispatcher:
             requested["mail_item_id"], proposal,
             expected_version=requested["version"],
         )
+        stored_chat = proposed.get("card_chat_id")
+        if stored_chat:
+            chat_id = str(stored_chat)
+            stored_thread = proposed.get("card_thread_id")
+            thread_id = str(stored_thread) if stored_thread else None
+        else:
+            dest = self._card_destination(proposed.get("draft_owner"))
+            chat_id = dest.chat_id
+            thread_id = dest.thread_id
         message_id = self.notifier.send(
-            account_id=account_id, chat_id=proposed["card_chat_id"] or self.telegram_chat_id,
+            account_id=account_id, chat_id=chat_id,
             text=_format_card(proposed, proposal), token=proposed["callback_token"],
+            thread_id=thread_id,
         )
         return self.ledger.attach_card(
             proposed["mail_item_id"], channel="telegram", account_id=account_id,
-            chat_id=proposed["card_chat_id"] or self.telegram_chat_id, message_id=message_id,
+            chat_id=chat_id, message_id=message_id, thread_id=thread_id,
             actor="revision-notifier",
         )
 

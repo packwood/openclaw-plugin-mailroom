@@ -22,12 +22,18 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+export type TelegramDestination = {
+  chatId: string;
+  threadId?: string;
+};
+
 type Config = {
   dbPath: string;
   pythonPath: string;
   pythonExecutable?: string;
   telegramChatId: string;
   telegramThreadId?: string;
+  telegramDestinations?: Record<string, TelegramDestination>;
   routingReviewAgentId: string;
   routingReviewTelegramAccountId: string;
   reviewOwners: string[];
@@ -97,11 +103,79 @@ export function invalidInstructionsMessage(instructions: string): string | null 
   return null;
 }
 
-function resolveConfig(raw: any): Config {
+const TOPIC_CONVERSATION = /^(.*):topic:(\d+)$/;
+
+export function parseTelegramConversationId(
+  conversationId: string,
+): { chatId: string; threadId?: string } {
+  const value = String(conversationId || "");
+  const match = value.match(TOPIC_CONVERSATION);
+  if (match) return { chatId: match[1], threadId: match[2] };
+  return { chatId: value };
+}
+
+function isTelegramGroupChat(chatId: string): boolean {
+  return String(chatId).startsWith("-");
+}
+
+function groupRevisionAuthorized(ctx: Record<string, any>): boolean {
+  return ctx.auth?.isAuthorizedSender === true || ctx.isAuthorizedSender === true;
+}
+
+export function resolveTelegramDestination(
+  destinations: Record<string, TelegramDestination> | undefined,
+  owner: string | null | undefined,
+  fallback: TelegramDestination,
+  reviewAgentId: string,
+): TelegramDestination {
+  const key = String(owner || "").trim() || reviewAgentId;
+  const match = key ? destinations?.[key] : undefined;
+  if (match?.chatId) return { chatId: match.chatId, threadId: match.threadId };
+  return { chatId: fallback.chatId, threadId: fallback.threadId };
+}
+
+function parseTelegramDestinations(raw: unknown): Record<string, TelegramDestination> {
+  if (raw == null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      "Mailroom telegramDestinations must be an object mapping OpenClaw agent ids to destinations",
+    );
+  }
+  const destinations: Record<string, TelegramDestination> = {};
+  for (const [agentId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(
+        `Mailroom telegramDestinations.${agentId} must be an object with a non-empty chatId`,
+      );
+    }
+    const entry = value as Record<string, unknown>;
+    const chatId = String(entry.chatId ?? "").trim();
+    if (!chatId) {
+      throw new Error(
+        `Mailroom telegramDestinations.${agentId} requires a non-empty chatId`,
+      );
+    }
+    const destination: TelegramDestination = { chatId };
+    if (entry.threadId != null) {
+      const threadId = String(entry.threadId).trim();
+      if (!threadId) {
+        throw new Error(
+          `Mailroom telegramDestinations.${agentId} threadId must be a non-empty string when set`,
+        );
+      }
+      destination.threadId = threadId;
+    }
+    destinations[String(agentId)] = destination;
+  }
+  return destinations;
+}
+
+export function resolveConfig(raw: any): Config {
   const telegramChatId = String(
     raw?.telegramChatId || process.env.MAILROOM_TELEGRAM_CHAT_ID || "",
   );
   const telegramThreadId = raw?.telegramThreadId ? String(raw.telegramThreadId) : undefined;
+  const telegramDestinations = parseTelegramDestinations(raw?.telegramDestinations);
   const routingOwnerMode = raw?.routingOwnerMode === undefined
     ? "all"
     : String(raw.routingOwnerMode);
@@ -126,6 +200,7 @@ function resolveConfig(raw: any): Config {
     pythonExecutable: String(raw?.pythonExecutable || "python3"),
     telegramChatId,
     telegramThreadId,
+    telegramDestinations,
     routingReviewAgentId: String(raw?.routingReviewAgentId || "main"),
     routingReviewTelegramAccountId: String(
       raw?.routingReviewTelegramAccountId || "default",
@@ -691,6 +766,7 @@ function revisionTokenFromReply(replyBody: unknown): string | null {
 
 async function runRevision(
   cfg: Config, token: string, instructions: string, accountId: string, chatId: string,
+  threadId?: string,
 ): Promise<Record<string, any>> {
   if (cfg.revisionRunner) return cfg.revisionRunner(token, instructions, accountId, chatId);
   if (!chatId) throw new Error("Mailroom could not resolve the approval chat for this revision");
@@ -699,7 +775,12 @@ async function runRevision(
     "revise", token, instructions,
     "--account-id", accountId, "--telegram-chat-id", chatId,
   ];
-  if (cfg.telegramThreadId) args.push("--telegram-thread-id", cfg.telegramThreadId);
+  const resolvedThread = threadId || cfg.telegramThreadId;
+  if (resolvedThread) args.push("--telegram-thread-id", resolvedThread);
+  const destinations = cfg.telegramDestinations;
+  if (destinations && Object.keys(destinations).length) {
+    args.push("--telegram-destinations", JSON.stringify(destinations));
+  }
   const { stdout } = await execFileAsync(
     cfg.pythonExecutable || "python3",
     args,
@@ -730,7 +811,8 @@ export async function handleRevisionReply(
   if (!token) return;
 
   const accountId = String(ctx.accountId || "");
-  const chatId = String(ctx.conversationId || "");
+  const conversation = parseTelegramConversationId(String(ctx.conversationId || ""));
+  const chatId = conversation.chatId;
   const senderId = String(event.senderId || ctx.senderId || "");
   const instructions = String(event.content || "").trim();
   if (!accountId || !chatId || !senderId) {
@@ -776,7 +858,24 @@ export async function handleRevisionReply(
       text: "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.",
     };
   }
-  if (senderId !== String(item.card_chat_id)) {
+  const cardThreadId = item.card_thread_id == null || String(item.card_thread_id) === ""
+    ? undefined
+    : String(item.card_thread_id);
+  if (cardThreadId && conversation.threadId !== cardThreadId) {
+    return {
+      handled: true,
+      text: "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.",
+    };
+  }
+  const cardChatId = String(item.card_chat_id);
+  if (isTelegramGroupChat(cardChatId)) {
+    if (!groupRevisionAuthorized(ctx)) {
+      return {
+        handled: true,
+        text: "Mailroom revision rejected: sender is not authorized. Nothing was changed.",
+      };
+    }
+  } else if (senderId !== cardChatId) {
     return {
       handled: true,
       text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed.",
@@ -786,7 +885,9 @@ export async function handleRevisionReply(
   try {
     return {
       handled: true,
-      text: revisionResultMessage(await runRevision(cfg, token, instructions, accountId, chatId)),
+      text: revisionResultMessage(
+        await runRevision(cfg, token, instructions, accountId, chatId, cardThreadId),
+      ),
     };
   } catch (error: any) {
     logInternalError("revision reply execution failed", error);
@@ -803,7 +904,6 @@ export async function handleRevisionReply(
 export async function handleRevisionCommand(
   ctx: Record<string, any>, cfg: Config,
 ): Promise<{ text: string }> {
-  if (!ctx.isAuthorizedSender) return { text: "Mailroom revision rejected: sender is not authorized." };
   const match = String(ctx.args || "").match(/^([A-Za-z0-9_-]{8,32})\s+([\s\S]+)$/);
   if (!match) return { text: "Usage: /mr-revise <token> <instructions>" };
   const token = match[1];
@@ -837,13 +937,35 @@ export async function handleRevisionCommand(
   if (!item) {
     return { text: "This Mailroom revision token is stale or does not match this bot. Nothing was changed." };
   }
-  if (senderId !== String(item.card_chat_id)) {
-    return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+  const cardChatId = String(item.card_chat_id);
+  const cardThreadId = item.card_thread_id == null || String(item.card_thread_id) === ""
+    ? undefined
+    : String(item.card_thread_id);
+  const conversation = parseTelegramConversationId(String(ctx.conversationId || ""));
+  if (isTelegramGroupChat(cardChatId)) {
+    if (!groupRevisionAuthorized(ctx)) {
+      return { text: "Mailroom revision rejected: sender is not authorized." };
+    }
+    if (!conversation.chatId || conversation.chatId !== cardChatId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
+    if (cardThreadId && conversation.threadId !== cardThreadId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
+  } else {
+    if (!ctx.isAuthorizedSender) {
+      return { text: "Mailroom revision rejected: sender is not authorized." };
+    }
+    if (senderId !== cardChatId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
   }
   try {
     return {
       text: revisionResultMessage(
-        await runRevision(cfg, token, instructions, accountId, String(item.card_chat_id)),
+        await runRevision(
+          cfg, token, instructions, accountId, cardChatId, cardThreadId,
+        ),
       ),
     };
   } catch (error: any) {

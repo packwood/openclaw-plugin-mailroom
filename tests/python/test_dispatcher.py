@@ -12,11 +12,14 @@ from mailroom.dispatcher import (
     DraftDispatcher,
     OpenClawAgentRunner,
     TelegramCardNotifier,
+    TelegramDestination,
     _extract_proposal,
     _format_card,
     _format_review_card,
     _workflow_context_violations,
     format_revision_prompt,
+    parse_telegram_destinations,
+    resolve_telegram_destination,
 )
 from mailroom.ledger import MailroomLedger
 from mailroom.models import IncomingMessage, MailState, Priority, RouteDecision
@@ -163,6 +166,30 @@ class DispatcherTests(unittest.TestCase):
         ]
         self.assertLessEqual(len(callback.encode("utf-8")), 64)
         self.assertNotIn(owner, callback)
+
+    def test_telegram_notifier_per_call_thread_id_wins_over_constructor(self):
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"messageId": "77"}), stderr="",
+        )
+        notifier = TelegramCardNotifier(thread_id="1")
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run", return_value=completed,
+        ) as run:
+            notifier.send(
+                account_id="primary", chat_id="chat", text="hello", token="abcdefghijkl",
+                thread_id="21",
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--thread-id") + 1], "21")
+        with mock.patch(
+            "mailroom.dispatcher.subprocess.run", return_value=completed,
+        ) as run:
+            notifier.send(
+                account_id="primary", chat_id="chat", text="hello", token="abcdefghijkl",
+                thread_id=None,
+            )
+        command = run.call_args.args[0]
+        self.assertNotIn("--thread-id", command)
 
     def test_telegram_notifier_falls_back_for_owner_without_a_bot_account(self):
         completed = subprocess.CompletedProcess(
@@ -1123,6 +1150,162 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(self.ledger.get(own["mail_item_id"])["state"], MailState.DRAFT_PROPOSED.value)
         self.assertEqual(self.ledger.get(row["mail_item_id"])["state"], MailState.DEFERRED.value)
+
+    def test_parse_telegram_destinations_rejects_malformed_json(self):
+        with self.assertRaisesRegex(ValueError, "not valid JSON"):
+            parse_telegram_destinations("{not json")
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            parse_telegram_destinations("[]")
+        with self.assertRaisesRegex(ValueError, "requires a non-empty chatId"):
+            parse_telegram_destinations(json.dumps({"billy": {"threadId": "21"}}))
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            parse_telegram_destinations(json.dumps({"billy": "-1000000000001"}))
+
+    def test_resolve_telegram_destination_uses_owner_then_fallback(self):
+        destinations = {
+            "billy": TelegramDestination(chat_id="-1000000000001", thread_id="21"),
+            "main": TelegramDestination(chat_id="-1000000000009", thread_id="9"),
+        }
+        fallback = TelegramDestination(chat_id="chat", thread_id="1")
+        self.assertEqual(
+            resolve_telegram_destination(
+                destinations, owner="billy", fallback=fallback, review_agent_id="main",
+            ),
+            destinations["billy"],
+        )
+        self.assertEqual(
+            resolve_telegram_destination(
+                destinations, owner="recon", fallback=fallback, review_agent_id="main",
+            ),
+            fallback,
+        )
+        self.assertEqual(
+            resolve_telegram_destination(
+                destinations, owner=None, fallback=fallback, review_agent_id="main",
+            ),
+            destinations["main"],
+        )
+
+    def test_owner_destination_is_used_for_approval_cards(self):
+        with self.ledger.transaction() as conn:
+            conn.execute(
+                "UPDATE mail_items SET draft_owner = 'billy' WHERE mail_item_id = ?",
+                (self.item["mail_item_id"],),
+            )
+        notifier = FakeNotifier()
+        summary = DraftDispatcher(
+            self.ledger, FakeRunner(), notifier, telegram_chat_id="chat",
+            telegram_thread_id="1",
+            telegram_destinations={
+                "billy": TelegramDestination(chat_id="-1000000000001", thread_id="21"),
+            },
+        ).run()
+        self.assertEqual((summary.drafted, summary.cards_sent), (1, 1))
+        self.assertEqual(notifier.calls[0]["chat_id"], "-1000000000001")
+        self.assertEqual(notifier.calls[0]["thread_id"], "21")
+        item = self.ledger.get(self.item["mail_item_id"])
+        self.assertEqual(item["card_chat_id"], "-1000000000001")
+        self.assertEqual(item["card_thread_id"], "21")
+
+    def test_missing_owner_destination_falls_back_to_global_chat(self):
+        notifier = FakeNotifier()
+        summary = DraftDispatcher(
+            self.ledger, FakeRunner(), notifier, telegram_chat_id="chat",
+            telegram_thread_id="1",
+            telegram_destinations={
+                "billy": TelegramDestination(chat_id="-1000000000001", thread_id="21"),
+            },
+        ).run()
+        self.assertEqual((summary.drafted, summary.cards_sent), (1, 1))
+        self.assertEqual(notifier.calls[0]["chat_id"], "chat")
+        self.assertEqual(notifier.calls[0]["thread_id"], "1")
+        item = self.ledger.get(self.item["mail_item_id"])
+        self.assertEqual(item["card_chat_id"], "chat")
+        self.assertEqual(item["card_thread_id"], "1")
+
+    def test_routing_review_uses_review_agent_destination(self):
+        msg = IncomingMessage(
+            mailbox="operator@example.com", provider_message_id="review-dest",
+            conversation_id="review-dest-thread", received_at="2026-07-12T12:00:00Z",
+            sender_email="x@example.com", sender_name="X", subject="Ambiguous",
+            body_preview="Hello",
+        )
+        row, _ = self.ledger.upsert_message(msg, run_mode="production")
+        self.ledger.route(row["mail_item_id"], RouteDecision(
+            draft_owner=None, watchers=(), confidence=0.0, reasons=(), outcome="UNMATCHED",
+        ))
+        notifier = FakeNotifier()
+        summary = DraftDispatcher(
+            self.ledger, FakeRunner(), notifier, telegram_chat_id="chat",
+            telegram_thread_id="1",
+            telegram_destinations={
+                "main": TelegramDestination(chat_id="-1000000000009", thread_id="9"),
+            },
+        ).run()
+        self.assertEqual(summary.review_cards_sent, 1)
+        review_call = next(call for call in notifier.calls if call.get("kind") == "review")
+        self.assertEqual(review_call["chat_id"], "-1000000000009")
+        self.assertEqual(review_call["thread_id"], "9")
+        review = self.ledger.get(row["mail_item_id"])
+        self.assertEqual(review["card_chat_id"], "-1000000000009")
+        self.assertEqual(review["card_thread_id"], "9")
+
+    def test_revision_reuses_persisted_card_thread(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        item = self.ledger.propose_draft(item["mail_item_id"], {
+            "reply_text": "Old reply", "reply_all": "auto", "rationale": "ack",
+            "context_checks": workflow_checks(),
+        })
+        item = self.ledger.attach_card(
+            item["mail_item_id"], channel="telegram", account_id="primary",
+            chat_id="-1000000000001", message_id="card", thread_id="21",
+        )
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.REVISION_REQUESTED, actor="test",
+        )
+        notifier = FakeNotifier()
+        result = DraftDispatcher(
+            self.ledger, FakeRunner(), notifier, telegram_chat_id="chat",
+            telegram_thread_id="1",
+        ).revise(
+            item["callback_token"], "Make it shorter",
+            account_id="primary", chat_id="-1000000000001",
+        )
+        self.assertEqual(notifier.calls[0]["chat_id"], "-1000000000001")
+        self.assertEqual(notifier.calls[0]["thread_id"], "21")
+        self.assertEqual(result["card_chat_id"], "-1000000000001")
+        self.assertEqual(result["card_thread_id"], "21")
+
+    def test_revision_of_legacy_null_thread_does_not_add_a_thread(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        item = self.ledger.propose_draft(item["mail_item_id"], {
+            "reply_text": "Old reply", "reply_all": "auto", "rationale": "ack",
+            "context_checks": workflow_checks(),
+        })
+        item = self.ledger.attach_card(
+            item["mail_item_id"], channel="telegram", account_id="primary",
+            chat_id="chat", message_id="card",
+        )
+        self.assertIsNone(item["card_thread_id"])
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.REVISION_REQUESTED, actor="test",
+        )
+        notifier = FakeNotifier()
+        result = DraftDispatcher(
+            self.ledger, FakeRunner(), notifier, telegram_chat_id="chat",
+            telegram_thread_id="1",
+            telegram_destinations={
+                "primary": TelegramDestination(chat_id="-1000000000001", thread_id="21"),
+            },
+        ).revise(
+            item["callback_token"], "Make it shorter",
+            account_id="primary", chat_id="chat",
+        )
+        self.assertEqual(notifier.calls[0]["chat_id"], "chat")
+        self.assertIsNone(notifier.calls[0]["thread_id"])
+        self.assertIsNone(result["card_thread_id"])
 
 
 if __name__ == "__main__":

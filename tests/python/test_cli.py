@@ -7,7 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from mailroom.cli import _edit_json_in_editor, _triage_cycle_failed, main
+from mailroom.cli import (
+    _edit_json_in_editor,
+    _telegram_destinations,
+    _triage_cycle_failed,
+    main,
+)
 from mailroom.controller import ShadowRunSummary
 from mailroom.profile_generation import (
     FleetDiscoveryError,
@@ -699,6 +704,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertEqual(printed[0]["triage_errors"], 1)
         self.assertEqual(captured[0].api_key, "")
+
+    def test_telegram_destinations_flag_rejects_malformed_json(self):
+        with self.assertRaises(SystemExit) as raised:
+            _telegram_destinations("{not json")
+        self.assertIn("not valid JSON", str(raised.exception))
+        with self.assertRaises(SystemExit) as raised:
+            _telegram_destinations("[]")
+        self.assertIn("JSON object", str(raised.exception))
+        parsed = _telegram_destinations(
+            '{"billy":{"chatId":"-1000000000001","threadId":"21"}}'
+        )
+        self.assertEqual(parsed["billy"].chat_id, "-1000000000001")
+        self.assertEqual(parsed["billy"].thread_id, "21")
+        self.assertEqual(_telegram_destinations(None), {})
 
 
 if __name__ == "__main__":

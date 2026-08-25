@@ -309,8 +309,9 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(proposed["state"], MailState.DRAFT_PROPOSED.value)
         card = self.ledger.attach_card(
             proposed["mail_item_id"], channel="telegram", account_id="primary",
-            chat_id="123456789", message_id="42",
+            chat_id="123456789", message_id="42", thread_id="21",
         )
+        self.assertEqual(card["card_thread_id"], "21")
         resolved = self.ledger.get_callback_item(
             card["callback_token"], channel="telegram", account_id="primary",
             chat_id="123456789", message_id="42",
@@ -376,6 +377,25 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(
             json.loads(row["metadata_json"])["draft_provenance"], provenance,
         )
+
+    def test_card_thread_id_is_added_to_existing_ledgers(self):
+        path = Path(self.temp.name) / "legacy.db"
+        original = MailroomLedger(path)
+        item, _ = original.upsert_message(message())
+        with original.connect() as conn:
+            conn.execute("ALTER TABLE mail_items DROP COLUMN card_thread_id")
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(mail_items)")}
+        self.assertNotIn("card_thread_id", columns)
+        ledger = MailroomLedger(path)
+        with ledger.connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(mail_items)")}
+            row = conn.execute(
+                "SELECT mail_item_id, card_thread_id FROM mail_items WHERE mail_item_id = ?",
+                (item["mail_item_id"],),
+            ).fetchone()
+        self.assertIn("card_thread_id", columns)
+        self.assertEqual(row["mail_item_id"], item["mail_item_id"])
+        self.assertIsNone(row["card_thread_id"])
 
 
 if __name__ == "__main__":

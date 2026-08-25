@@ -27,6 +27,7 @@ from .dispatcher import (
     DraftDispatcher,
     OpenClawAgentRunner,
     TelegramCardNotifier,
+    parse_telegram_destinations,
     proposal_violations,
 )
 from .drafting_policy import DraftingPolicy
@@ -117,6 +118,13 @@ def _triage_cycle_failed(summary: dict) -> bool:
     )
 
 
+def _telegram_destinations(raw: str | None):
+    try:
+        return parse_telegram_destinations(raw)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mailroom", description="Mailroom deterministic control CLI"
@@ -169,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     cycle.add_argument("--telegram-chat-id", required=True)
     cycle.add_argument("--telegram-thread-id")
     cycle.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
+    cycle.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
     )
@@ -215,6 +227,10 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--telegram-chat-id", required=True)
     dispatch.add_argument("--telegram-thread-id")
     dispatch.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
+    dispatch.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
     )
@@ -238,6 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
     revise.add_argument("--account-id", required=True)
     revise.add_argument("--telegram-chat-id", required=True)
     revise.add_argument("--telegram-thread-id")
+    revise.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
 
     profiles = sub.add_parser(
         "profiles", help="Generate and inspect fleet responsibility profiles"
@@ -538,6 +558,8 @@ def main(argv: list[str] | None = None) -> int:
                 OpenClawAgentRunner(),
                 TelegramCardNotifier(thread_id=args.telegram_thread_id),
                 telegram_chat_id=args.telegram_chat_id,
+                telegram_thread_id=args.telegram_thread_id,
+                telegram_destinations=_telegram_destinations(args.telegram_destinations),
                 review_agent_id=args.routing_review_agent_id,
                 review_account_id=args.routing_review_telegram_account_id,
                 review_owners=_review_owners(profiles, router),
@@ -629,6 +651,8 @@ def main(argv: list[str] | None = None) -> int:
             OpenClawAgentRunner(),
             TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
+            telegram_thread_id=args.telegram_thread_id,
+            telegram_destinations=_telegram_destinations(args.telegram_destinations),
             review_agent_id=args.routing_review_agent_id,
             review_account_id=args.routing_review_telegram_account_id,
             review_owners=_review_owners(profiles, router),
@@ -676,6 +700,8 @@ def main(argv: list[str] | None = None) -> int:
             OpenClawAgentRunner(),
             TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
+            telegram_thread_id=args.telegram_thread_id,
+            telegram_destinations=_telegram_destinations(args.telegram_destinations),
             reply_checker=MatonSentReplyChecker(
                 connection_id=connection, api_key=api_key
             ),

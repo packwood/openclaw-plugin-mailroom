@@ -97,6 +97,10 @@ Mailroom reads its plugin settings from `plugins.entries.mailroom.config`:
         enabled: true,
         config: {
           telegramChatId: "123456789",
+          telegramDestinations: {
+            billy: { chatId: "-1000000000001", threadId: "12" },
+            recon: { chatId: "-1000000000002", threadId: "34" }
+          },
           routingOwnerMode: "all",
           accounts: {
             work: "operator@example.com"
@@ -118,6 +122,8 @@ Optional settings:
 | `connectionsPath` | Override `~/.openclaw/shared/connections.json` |
 | `signaturesPath` | Directory containing `<account>.html` signatures |
 | `accounts` | Friendly account ID to mailbox-address map |
+| `telegramThreadId` | Optional global Telegram forum-topic thread ID for Mailroom cards |
+| `telegramDestinations` | Per-owner map of OpenClaw agent ID to `{ chatId, threadId? }`. Owners without an entry use `telegramChatId`/`telegramThreadId`. Routing-review cards use the `routingReviewAgentId` entry when present |
 | `routingReviewTelegramAccountId` | Telegram account for ambiguous routing-review cards; set this to Orchestrator's account (`default` in a standard OpenClaw setup) |
 | `routingReviewAgentId` | Agent whose owner cards share the routing-review Telegram account (`main` for Orchestrator); OpenClaw must bind that Telegram account to the same agent |
 | `routingOwnerMode` | `all` (default) makes every profiled/discovered agent a routing owner; `selected` limits routing to `reviewOwners` |

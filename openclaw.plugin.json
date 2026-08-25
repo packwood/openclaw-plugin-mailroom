@@ -29,6 +29,27 @@
         "minLength": 1,
         "description": "Optional Telegram forum-topic thread ID for Mailroom cards."
       },
+      "telegramDestinations": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["chatId"],
+          "properties": {
+            "chatId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Telegram chat ID for this agent's Mailroom cards."
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional Telegram forum-topic thread ID for this agent's Mailroom cards."
+            }
+          }
+        },
+        "description": "Per-owner Telegram destinations for Mailroom cards. Keys are OpenClaw agent IDs. Owners without an entry use telegramChatId/telegramThreadId."
+      },
       "routingReviewTelegramAccountId": {
         "type": "string",
         "minLength": 1,

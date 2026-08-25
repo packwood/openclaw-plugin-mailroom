@@ -163,6 +163,7 @@ class MailroomLedger:
                     card_channel TEXT,
                     card_account_id TEXT,
                     card_chat_id TEXT,
+                    card_thread_id TEXT,
                     card_message_id TEXT,
                     last_error TEXT,
                     run_mode TEXT NOT NULL DEFAULT 'shadow',
@@ -250,6 +251,7 @@ class MailroomLedger:
                 "card_channel": "ALTER TABLE mail_items ADD COLUMN card_channel TEXT",
                 "card_account_id": "ALTER TABLE mail_items ADD COLUMN card_account_id TEXT",
                 "card_chat_id": "ALTER TABLE mail_items ADD COLUMN card_chat_id TEXT",
+                "card_thread_id": "ALTER TABLE mail_items ADD COLUMN card_thread_id TEXT",
                 "card_message_id": "ALTER TABLE mail_items ADD COLUMN card_message_id TEXT",
                 "deferred_from_state": "ALTER TABLE mail_items ADD COLUMN deferred_from_state TEXT",
                 "send_accepted_at": "ALTER TABLE mail_items ADD COLUMN send_accepted_at TEXT",
@@ -619,7 +621,8 @@ class MailroomLedger:
         patch = patch or {}
         allowed_patch = {
             "deferred_until", "outlook_draft_id", "approval_fingerprint", "last_error",
-            "proposal_json", "card_channel", "card_account_id", "card_chat_id", "card_message_id",
+            "proposal_json", "card_channel", "card_account_id", "card_chat_id", "card_thread_id",
+            "card_message_id",
             "deferred_from_state", "send_accepted_at",
             "sent_message_id",
             "replied_sent_id", "replied_sent_at",
@@ -889,23 +892,31 @@ class MailroomLedger:
         account_id: str,
         chat_id: str,
         message_id: str,
+        thread_id: str | None = None,
         actor: str = "notifier",
     ) -> dict[str, Any]:
+        thread_id = str(thread_id) if thread_id else None
         with self.transaction() as conn:
             row = self._get_row(conn, mail_item_id)
             result = conn.execute(
                 """
                 UPDATE mail_items SET card_channel = ?, card_account_id = ?, card_chat_id = ?,
-                    card_message_id = ?, updated_at = ?, version = version + 1
+                    card_thread_id = ?, card_message_id = ?, updated_at = ?, version = version + 1
                 WHERE mail_item_id = ? AND version = ?
                 """,
-                (channel, account_id, chat_id, message_id, utcnow(), mail_item_id, row["version"]),
+                (
+                    channel, account_id, chat_id, thread_id, message_id, utcnow(),
+                    mail_item_id, row["version"],
+                ),
             )
             if result.rowcount != 1:
                 raise ConcurrentUpdate(mail_item_id)
             self._event(
                 conn, mail_item_id, "APPROVAL_CARD_ATTACHED", row["state"], row["state"], actor,
-                {"channel": channel, "account_id": account_id, "chat_id": chat_id, "message_id": message_id},
+                {
+                    "channel": channel, "account_id": account_id, "chat_id": chat_id,
+                    "thread_id": thread_id, "message_id": message_id,
+                },
             )
             return dict(self._get_row(conn, mail_item_id))
 
