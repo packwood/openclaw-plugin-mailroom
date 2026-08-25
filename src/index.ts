@@ -27,6 +27,7 @@ type Config = {
   pythonPath: string;
   pythonExecutable?: string;
   telegramChatId: string;
+  telegramThreadId?: string;
   routingReviewAgentId: string;
   routingReviewTelegramAccountId: string;
   reviewOwners: string[];
@@ -100,6 +101,7 @@ function resolveConfig(raw: any): Config {
   const telegramChatId = String(
     raw?.telegramChatId || process.env.MAILROOM_TELEGRAM_CHAT_ID || "",
   );
+  const telegramThreadId = raw?.telegramThreadId ? String(raw.telegramThreadId) : undefined;
   const routingOwnerMode = raw?.routingOwnerMode === undefined
     ? "all"
     : String(raw.routingOwnerMode);
@@ -123,6 +125,7 @@ function resolveConfig(raw: any): Config {
     pythonPath: raw?.pythonPath || fileURLToPath(new URL("../python", import.meta.url)),
     pythonExecutable: String(raw?.pythonExecutable || "python3"),
     telegramChatId,
+    telegramThreadId,
     routingReviewAgentId: String(raw?.routingReviewAgentId || "main"),
     routingReviewTelegramAccountId: String(
       raw?.routingReviewTelegramAccountId || "default",
@@ -691,13 +694,15 @@ async function runRevision(
 ): Promise<Record<string, any>> {
   if (cfg.revisionRunner) return cfg.revisionRunner(token, instructions, accountId, chatId);
   if (!chatId) throw new Error("Mailroom could not resolve the approval chat for this revision");
+  const args = [
+    "-m", "mailroom.cli", "--db", cfg.dbPath,
+    "revise", token, instructions,
+    "--account-id", accountId, "--telegram-chat-id", chatId,
+  ];
+  if (cfg.telegramThreadId) args.push("--telegram-thread-id", cfg.telegramThreadId);
   const { stdout } = await execFileAsync(
     cfg.pythonExecutable || "python3",
-    [
-      "-m", "mailroom.cli", "--db", cfg.dbPath,
-      "revise", token, instructions,
-      "--account-id", accountId, "--telegram-chat-id", chatId,
-    ],
+    args,
     {
       timeout: 660000,
       env: { ...process.env, PYTHONPATH: cfg.pythonPath },

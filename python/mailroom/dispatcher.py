@@ -185,8 +185,9 @@ def _routing_owner_callback_ref(owner: str) -> str:
 
 
 class TelegramCardNotifier:
-    def __init__(self, executable: str = "openclaw"):
+    def __init__(self, executable: str = "openclaw", thread_id: str | None = None):
         self.executable = executable
+        self.thread_id = str(thread_id) if thread_id else None
         self._telegram_accounts: set[str] | None = None
 
     def resolve_account_id(self, requested: str, fallback: str) -> str:
@@ -265,12 +266,17 @@ class TelegramCardNotifier:
     def _send(
         self, *, account_id: str, chat_id: str, text: str, presentation: dict[str, Any],
     ) -> str:
+        command = [
+            self.executable, "message", "send", "--channel", "telegram",
+            "--account", account_id, "--target", chat_id,
+        ]
+        if self.thread_id:
+            command.extend(["--thread-id", self.thread_id])
+        command.extend([
+            "--message", text, "--presentation", json.dumps(presentation), "--json",
+        ])
         completed = subprocess.run(
-            [
-                self.executable, "message", "send", "--channel", "telegram",
-                "--account", account_id, "--target", chat_id,
-                "--message", text, "--presentation", json.dumps(presentation), "--json",
-            ],
+            command,
             text=True, capture_output=True, timeout=60,
         )
         if completed.returncode != 0:

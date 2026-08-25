@@ -24,6 +24,11 @@
         "minLength": 1,
         "description": "Telegram chat authorized to approve Mailroom actions."
       },
+      "telegramThreadId": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Optional Telegram forum-topic thread ID for Mailroom cards."
+      },
       "routingReviewTelegramAccountId": {
         "type": "string",
         "minLength": 1,

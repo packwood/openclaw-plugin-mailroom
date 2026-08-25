@@ -167,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     cycle.add_argument("--telegram-chat-id", required=True)
+    cycle.add_argument("--telegram-thread-id")
     cycle.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
@@ -212,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     dispatch.add_argument("--telegram-chat-id", required=True)
+    dispatch.add_argument("--telegram-thread-id")
     dispatch.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
@@ -235,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     revise.add_argument("instructions")
     revise.add_argument("--account-id", required=True)
     revise.add_argument("--telegram-chat-id", required=True)
+    revise.add_argument("--telegram-thread-id")
 
     profiles = sub.add_parser(
         "profiles", help="Generate and inspect fleet responsibility profiles"
@@ -533,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
             DraftDispatcher(
                 ledger,
                 OpenClawAgentRunner(),
-                TelegramCardNotifier(),
+                TelegramCardNotifier(thread_id=args.telegram_thread_id),
                 telegram_chat_id=args.telegram_chat_id,
                 review_agent_id=args.routing_review_agent_id,
                 review_account_id=args.routing_review_telegram_account_id,
@@ -624,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
         dispatch_only_summary = DraftDispatcher(
             ledger,
             OpenClawAgentRunner(),
-            TelegramCardNotifier(),
+            TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
             review_agent_id=args.routing_review_agent_id,
             review_account_id=args.routing_review_telegram_account_id,
@@ -671,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         item = DraftDispatcher(
             ledger,
             OpenClawAgentRunner(),
-            TelegramCardNotifier(),
+            TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
             reply_checker=MatonSentReplyChecker(
                 connection_id=connection, api_key=api_key
