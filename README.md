@@ -124,6 +124,7 @@ Optional settings:
 | `accounts` | Friendly account ID to mailbox-address map |
 | `telegramThreadId` | Optional global Telegram forum-topic thread ID for Mailroom cards |
 | `telegramDestinations` | Per-owner map of OpenClaw agent ID to `{ chatId, threadId? }`. Owners without an entry use `telegramChatId`/`telegramThreadId`. Routing-review cards use the `routingReviewAgentId` entry when present |
+| `revisionApprovers` | Telegram sender IDs allowed to drive natural-language revisions from a group card. When omitted, defaults to `[telegramChatId]` if that value is a DM id; otherwise no one is approved until the list is set |
 | `routingReviewTelegramAccountId` | Telegram account for ambiguous routing-review cards; set this to Orchestrator's account (`default` in a standard OpenClaw setup) |
 | `routingReviewAgentId` | Agent whose owner cards share the routing-review Telegram account (`main` for Orchestrator); OpenClaw must bind that Telegram account to the same agent |
 | `routingOwnerMode` | `all` (default) makes every profiled/discovered agent a routing owner; `selected` limits routing to `reviewOwners` |

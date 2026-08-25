@@ -20,6 +20,10 @@ Semantic Versioning after the first stable release.
   `<chatId>:topic:<threadId>` conversation IDs before ledger lookup.
 - Authorize group-topic revisions with a fail-closed `isAuthorizedSender`
   check instead of treating the group chat ID as a user ID.
+- Authorize natural-language group-card revision replies via
+  `revisionApprovers` (defaulting to `[telegramChatId]` when that value is a
+  DM id), because OpenClaw's `before_dispatch` hook does not populate
+  `isAuthorizedSender`.
 
 ## [0.1.10] - 2026-07-31
 

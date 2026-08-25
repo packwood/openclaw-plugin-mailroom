@@ -69,6 +69,23 @@ describe("Mailroom telegram destinations", () => {
     expect(() => resolveConfig({ telegramDestinations: { billy: { chatId: "  " } } }))
       .toThrow("telegramDestinations.billy requires a non-empty chatId");
   });
+
+  it("defaults revisionApprovers to the DM telegramChatId and validates the list", () => {
+    expect(resolveConfig({ telegramChatId: "123456789" }).revisionApprovers)
+      .toEqual(["123456789"]);
+    expect(resolveConfig({ telegramChatId: "-1000000000001" }).revisionApprovers)
+      .toEqual([]);
+    expect(resolveConfig({
+      telegramChatId: "123456789", revisionApprovers: ["99887766", "112233"],
+    }).revisionApprovers).toEqual(["99887766", "112233"]);
+    expect(resolveConfig({
+      telegramChatId: "123456789", revisionApprovers: [],
+    }).revisionApprovers).toEqual([]);
+    expect(() => resolveConfig({ revisionApprovers: "99887766" }))
+      .toThrow("revisionApprovers must be an array of non-empty strings");
+    expect(() => resolveConfig({ revisionApprovers: ["99887766", ""] }))
+      .toThrow("revisionApprovers[1] must be a non-empty string");
+  });
 });
 
 const roots: string[] = [];
@@ -382,6 +399,113 @@ describe("Mailroom interactive handler", () => {
     expect(result).toMatchObject({ handled: true });
     expect(result?.text).toContain("stale or does not match");
     expect(calls).toEqual([]);
+  });
+
+  it("accepts a topic revision reply when the sender is in revisionApprovers", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare(`UPDATE mail_items SET state='REVISION_REQUESTED',
+      card_chat_id='-1003782061282', card_thread_id='432'`).run();
+    db.close();
+    const calls: any[] = [];
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "99887766",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary",
+      conversationId: "-1003782061282:topic:432",
+      senderId: "99887766",
+    }, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789",
+      revisionApprovers: ["99887766"], reviewOwners: ["primary"],
+      revisionRunner: async (...args) => {
+        calls.push(args);
+        return { ok: true };
+      },
+    });
+    expect(calls).toEqual([["token_1234", "Shorten it.", "primary", "-1003782061282"]]);
+    expect(result).toEqual({
+      handled: true, text: "✅ Revised proposal drafted. A new approval card was sent.",
+    });
+  });
+
+  it("rejects a topic revision reply when revisionApprovers is empty and no auth flag is present", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare(`UPDATE mail_items SET state='REVISION_REQUESTED',
+      card_chat_id='-1003782061282', card_thread_id='432'`).run();
+    db.close();
+    const calls: any[] = [];
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "99887766",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary",
+      conversationId: "-1003782061282:topic:432",
+      senderId: "99887766",
+    }, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789",
+      revisionApprovers: [], reviewOwners: ["primary"],
+      revisionRunner: async (...args: any[]) => {
+        calls.push(args);
+        return { ok: true };
+      },
+    });
+    expect(result?.text).toContain("not authorized");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a topic revision reply when the sender is not in revisionApprovers", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare(`UPDATE mail_items SET state='REVISION_REQUESTED',
+      card_chat_id='-1003782061282', card_thread_id='432'`).run();
+    db.close();
+    const calls: any[] = [];
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "99887766",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary",
+      conversationId: "-1003782061282:topic:432",
+      senderId: "99887766",
+    }, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789",
+      revisionApprovers: ["11223344"], reviewOwners: ["primary"],
+      revisionRunner: async (...args: any[]) => {
+        calls.push(args);
+        return { ok: true };
+      },
+    });
+    expect(result?.text).toContain("not authorized");
+    expect(calls).toEqual([]);
+  });
+
+  it("accepts a topic revision reply from the default DM telegramChatId approver", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare(`UPDATE mail_items SET state='REVISION_REQUESTED',
+      card_chat_id='-1003782061282', card_thread_id='432'`).run();
+    db.close();
+    const calls: any[] = [];
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "123456789",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary",
+      conversationId: "-1003782061282:topic:432",
+      senderId: "123456789",
+    }, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", reviewOwners: ["primary"],
+      revisionRunner: async (...args) => {
+        calls.push(args);
+        return { ok: true };
+      },
+    });
+    expect(calls).toEqual([["token_1234", "Shorten it.", "primary", "-1003782061282"]]);
+    expect(result).toEqual({
+      handled: true, text: "✅ Revised proposal drafted. A new approval card was sent.",
+    });
   });
 
   it("does not claim ordinary Telegram messages or unrelated replies", async () => {

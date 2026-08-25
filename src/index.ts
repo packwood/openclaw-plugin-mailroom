@@ -34,6 +34,7 @@ type Config = {
   telegramChatId: string;
   telegramThreadId?: string;
   telegramDestinations?: Record<string, TelegramDestination>;
+  revisionApprovers?: string[];
   routingReviewAgentId: string;
   routingReviewTelegramAccountId: string;
   reviewOwners: string[];
@@ -122,6 +123,34 @@ function groupRevisionAuthorized(ctx: Record<string, any>): boolean {
   return ctx.auth?.isAuthorizedSender === true || ctx.isAuthorizedSender === true;
 }
 
+function parseRevisionApprovers(raw: unknown, telegramChatId: string): string[] {
+  if (raw == null) {
+    return telegramChatId && !isTelegramGroupChat(telegramChatId) ? [telegramChatId] : [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error("Mailroom revisionApprovers must be an array of non-empty strings");
+  }
+  return raw.map((value, index) => {
+    const id = String(value ?? "").trim();
+    if (!id) {
+      throw new Error(`Mailroom revisionApprovers[${index}] must be a non-empty string`);
+    }
+    return id;
+  });
+}
+
+function resolvedRevisionApprovers(cfg: Config): string[] {
+  if (cfg.revisionApprovers !== undefined) return cfg.revisionApprovers;
+  return parseRevisionApprovers(undefined, String(cfg.telegramChatId || ""));
+}
+
+function groupRevisionReplyAuthorized(
+  ctx: Record<string, any>, senderId: string, approvers: string[],
+): boolean {
+  if (groupRevisionAuthorized(ctx)) return true;
+  return approvers.includes(senderId);
+}
+
 export function resolveTelegramDestination(
   destinations: Record<string, TelegramDestination> | undefined,
   owner: string | null | undefined,
@@ -176,6 +205,7 @@ export function resolveConfig(raw: any): Config {
   );
   const telegramThreadId = raw?.telegramThreadId ? String(raw.telegramThreadId) : undefined;
   const telegramDestinations = parseTelegramDestinations(raw?.telegramDestinations);
+  const revisionApprovers = parseRevisionApprovers(raw?.revisionApprovers, telegramChatId);
   const routingOwnerMode = raw?.routingOwnerMode === undefined
     ? "all"
     : String(raw.routingOwnerMode);
@@ -201,6 +231,7 @@ export function resolveConfig(raw: any): Config {
     telegramChatId,
     telegramThreadId,
     telegramDestinations,
+    revisionApprovers,
     routingReviewAgentId: String(raw?.routingReviewAgentId || "main"),
     routingReviewTelegramAccountId: String(
       raw?.routingReviewTelegramAccountId || "default",
@@ -869,7 +900,7 @@ export async function handleRevisionReply(
   }
   const cardChatId = String(item.card_chat_id);
   if (isTelegramGroupChat(cardChatId)) {
-    if (!groupRevisionAuthorized(ctx)) {
+    if (!groupRevisionReplyAuthorized(ctx, senderId, resolvedRevisionApprovers(cfg))) {
       return {
         handled: true,
         text: "Mailroom revision rejected: sender is not authorized. Nothing was changed.",

@@ -29,6 +29,11 @@
         "minLength": 1,
         "description": "Optional Telegram forum-topic thread ID for Mailroom cards."
       },
+      "revisionApprovers": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "description": "Telegram sender IDs permitted to drive natural-language revisions from a group card. Defaults to [telegramChatId] when that value is a DM id."
+      },
       "telegramDestinations": {
         "type": "object",
         "additionalProperties": {
