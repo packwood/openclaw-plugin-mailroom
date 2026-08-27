@@ -25,7 +25,7 @@ ALLOWED_TRANSITIONS: dict[MailState, set[MailState]] = {
     MailState.ROUTING_REVIEW: {MailState.ROUTED, MailState.DROPPED, MailState.ERROR},
     MailState.ROUTED: {MailState.DRAFT_REQUESTED, MailState.DROPPED, MailState.DEFERRED, MailState.DENIED_MESSAGE, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
     MailState.DRAFT_REQUESTED: {MailState.DRAFTING, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
-    MailState.DRAFTING: {MailState.DRAFT_REQUESTED, MailState.DRAFT_PROPOSED, MailState.DROPPED, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
+    MailState.DRAFTING: {MailState.DRAFT_REQUESTED, MailState.DRAFT_PROPOSED, MailState.REVISION_REQUESTED, MailState.DROPPED, MailState.REPLIED_ELSEWHERE, MailState.ERROR},
     MailState.DRAFT_PROPOSED: {MailState.DRAFT_REQUESTED, MailState.REVISION_REQUESTED, MailState.DEFERRED, MailState.DENIED_MESSAGE, MailState.REPLIED_ELSEWHERE, MailState.OUTLOOK_DRAFTING, MailState.CANCELLED, MailState.ERROR},
     MailState.REVISION_REQUESTED: {MailState.DRAFT_REQUESTED, MailState.DRAFTING, MailState.DRAFT_PROPOSED, MailState.REPLIED_ELSEWHERE, MailState.OUTLOOK_DRAFTED, MailState.CANCELLED, MailState.ERROR},
     MailState.DEFERRED: {MailState.ROUTED, MailState.DRAFT_PROPOSED, MailState.SEND_APPROVAL_PENDING, MailState.DENIED_MESSAGE, MailState.CANCELLED},
@@ -1034,6 +1034,32 @@ class MailroomLedger:
                 (mail_item_id_or_token, mail_item_id_or_token),
             ).fetchone()
             return dict(row) if row else None
+
+    def revision_instructions_in_flight(self, mail_item_id: str) -> str | None:
+        """Return the operator instructions behind the current drafting turn.
+
+        Revision drafts enter DRAFTING from REVISION_REQUESTED carrying the
+        operator's instructions in the transition event, which is their only
+        durable record. Returns None for an ordinary draft.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT from_state, metadata_json FROM mail_events
+                   WHERE mail_item_id = ? AND event_type = 'STATE_TRANSITION'
+                     AND to_state = ?
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (mail_item_id, MailState.DRAFTING.value),
+            ).fetchone()
+        if row is None or row["from_state"] != MailState.REVISION_REQUESTED.value:
+            return None
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            return None
+        instructions = metadata.get("instructions")
+        if not isinstance(instructions, str) or not instructions.strip():
+            return None
+        return instructions
 
     def list_items(
         self,

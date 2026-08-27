@@ -27,6 +27,7 @@ from .dispatcher import (
     DraftDispatcher,
     OpenClawAgentRunner,
     TelegramCardNotifier,
+    TransientAgentError,
     parse_telegram_destinations,
     proposal_violations,
 )
@@ -695,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                 "MATON_API_KEY is unavailable in the environment or ~/.openclaw/.env"
             )
         connection = resolve_connection(target["mailbox"])
-        item = DraftDispatcher(
+        dispatcher = DraftDispatcher(
             ledger,
             OpenClawAgentRunner(),
             TelegramCardNotifier(thread_id=args.telegram_thread_id),
@@ -712,12 +713,27 @@ def main(argv: list[str] | None = None) -> int:
                 connection_id=connection, api_key=api_key
             ),
             mailbox=target["mailbox"],
-        ).revise(
-            args.item,
-            args.instructions,
-            account_id=args.account_id,
-            chat_id=args.telegram_chat_id,
         )
+        try:
+            item = dispatcher.revise(
+                args.item,
+                args.instructions,
+                account_id=args.account_id,
+                chat_id=args.telegram_chat_id,
+            )
+        except TransientAgentError as exc:
+            # The revision stayed pending, so report a retryable outcome rather
+            # than a hard failure; the operator can reply to the same prompt again.
+            _print(
+                {
+                    "ok": False,
+                    "retryable": True,
+                    "mail_item_id": target["mail_item_id"],
+                    "state": MailState.REVISION_REQUESTED.value,
+                    "error": str(exc),
+                }
+            )
+            return 0
         _print(
             {
                 "ok": True,

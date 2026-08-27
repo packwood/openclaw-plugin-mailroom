@@ -24,6 +24,32 @@ from .router import _current_message_text
 _UNSET = object()
 
 
+class TransientAgentError(RuntimeError):
+    """A drafting turn that never reached the agent, so the work can be retried."""
+
+
+# OpenClaw Gateway transport failures: the socket died before a draft came back.
+# Restarts and drains land here; agent-level failures (timeouts, policy rejections)
+# deliberately do not, because those turns may still be live.
+_TRANSIENT_AGENT_MARKERS = (
+    "gatewaytransporterror",
+    "gateway closed",
+    "gateway is draining",
+    "abnormal closure",
+    "socket hang up",
+    "econnrefused",
+    "connection refused",
+    "gateway is not running",
+)
+
+
+def _is_transient_agent_failure(exc: Exception) -> bool:
+    if isinstance(exc, (DraftPolicyError, subprocess.TimeoutExpired)):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_AGENT_MARKERS)
+
+
 class DraftRunner(Protocol):
     def draft(self, owner: str, dossier: str) -> dict[str, Any]: ...
 
@@ -524,9 +550,16 @@ class DraftDispatcher:
                 errors += 1
                 if draft_version is None:
                     continue
+                # A dropped Gateway connection produced no draft, so return the item
+                # to the queue for the next cycle instead of stranding it in ERROR.
+                recovery = (
+                    MailState.DRAFT_REQUESTED
+                    if _is_transient_agent_failure(exc)
+                    else MailState.ERROR
+                )
                 try:
                     self.ledger.transition(
-                        item["mail_item_id"], MailState.ERROR, actor="dispatcher",
+                        item["mail_item_id"], recovery, actor="dispatcher",
                         expected_states=[MailState.DRAFTING],
                         expected_version=draft_version,
                         patch={"last_error": str(exc)[:2000]},
@@ -608,6 +641,9 @@ class DraftDispatcher:
                 updated_at = datetime.min.replace(tzinfo=timezone.utc)
             if updated_at >= cutoff:
                 continue
+            instructions = self.ledger.revision_instructions_in_flight(item["mail_item_id"])
+            if instructions and self._resume_stale_revision(item, instructions):
+                continue
             try:
                 self.ledger.transition(
                     item["mail_item_id"], MailState.DRAFT_REQUESTED,
@@ -617,6 +653,40 @@ class DraftDispatcher:
                 )
             except ConcurrentUpdate:
                 continue
+
+    def _resume_stale_revision(self, item: dict[str, Any], instructions: str) -> bool:
+        """Replay a revision whose drafting turn died along with its process.
+
+        Requeuing such an item as an ordinary draft would silently downgrade the
+        operator's revision to a fresh draft, discarding both the instructions and
+        the draft they were revising. Returns False when the item cannot be
+        replayed, so the caller falls back to the ordinary stale-draft requeue.
+        """
+        account_id = item.get("card_account_id")
+        chat_id = item.get("card_chat_id")
+        if not account_id or not chat_id:
+            return False
+        try:
+            self.ledger.transition(
+                item["mail_item_id"], MailState.REVISION_REQUESTED,
+                actor="dispatcher:stale-revision-recovery",
+                expected_states=[MailState.DRAFTING],
+                patch={"last_error": "Recovered an expired revision lease; retrying the revision."},
+                metadata={"instructions": instructions[:2000]},
+            )
+        except ConcurrentUpdate:
+            # Another cycle already owns this item; leave it to that owner.
+            return True
+        try:
+            self.revise(
+                item["callback_token"], instructions,
+                account_id=str(account_id), chat_id=str(chat_id),
+            )
+        except Exception as exc:
+            # revise() already recorded the outcome: still pending after a transport
+            # failure, or ERROR after a real one. Either way the ledger holds the cause.
+            self._record_error(item["mail_item_id"], exc)
+        return True
 
     def _record_error(self, mail_item_id: str, exc: Exception) -> None:
         with self.ledger.transaction() as conn:
@@ -694,6 +764,7 @@ class DraftDispatcher:
                     },
                 )
         previous = json.loads(item.get("proposal_json") or "{}")
+        prior_card_message_id = item.get("card_message_id")
         requested = self.ledger.transition(
             item["mail_item_id"], MailState.DRAFTING, actor="operator:revision-command",
             expected_states=[MailState.REVISION_REQUESTED],
@@ -706,6 +777,13 @@ class DraftDispatcher:
                 _build_revision_dossier(requested, previous, instructions),
             )
         except Exception as exc:
+            if _is_transient_agent_failure(exc) and self._reopen_revision(
+                requested, prior_card_message_id, exc,
+            ):
+                raise TransientAgentError(
+                    f"Revision could not reach the drafting agent; "
+                    f"the request is still pending: {exc}"
+                ) from exc
             self.ledger.transition(
                 requested["mail_item_id"], MailState.ERROR, actor="revision-dispatcher",
                 expected_states=[MailState.DRAFTING],
@@ -752,6 +830,34 @@ class DraftDispatcher:
             chat_id=chat_id, message_id=message_id, thread_id=thread_id,
             actor="revision-notifier",
         )
+
+    def _reopen_revision(
+        self, requested: dict[str, Any], card_message_id: str | None, exc: Exception,
+    ) -> bool:
+        """Hand a transport-failed revision back to the operator instead of ERROR.
+
+        The drafting turn is prose-only and performs no outward action, so a dropped
+        Gateway connection leaves nothing half-done. Restoring REVISION_REQUESTED and
+        the original card keeps the approval card live and lets the operator retry by
+        replying to the same revision prompt. Returns False when the ledger moved on,
+        so the caller can fall back to the terminal ERROR transition.
+        """
+        try:
+            self.ledger.transition(
+                requested["mail_item_id"], MailState.REVISION_REQUESTED,
+                actor="revision-dispatcher:transport-retry",
+                expected_states=[MailState.DRAFTING],
+                expected_version=requested["version"],
+                patch={
+                    "card_message_id": card_message_id,
+                    "last_error": str(exc)[:2000],
+                },
+                metadata={"retryable": True},
+            )
+            return True
+        except Exception:
+            # The ledger moved on underneath us; the caller records the real cause.
+            return False
 
     def _ensure_attachments(self, item: dict[str, Any]) -> dict[str, Any]:
         if item.get("attachments_json") is not None:

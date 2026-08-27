@@ -13,6 +13,7 @@ from mailroom.dispatcher import (
     OpenClawAgentRunner,
     TelegramCardNotifier,
     TelegramDestination,
+    TransientAgentError,
     _extract_proposal,
     _format_card,
     _format_review_card,
@@ -98,6 +99,26 @@ class FakeReplyChecker:
 
     def find_reply_after(self, _item):
         return self.reply
+
+
+GATEWAY_TRANSPORT_ERROR = (
+    "OpenClaw draft run failed: GatewayTransportError: gateway closed "
+    "(1006 abnormal closure (no close frame)): no close reason"
+)
+
+
+class GatewayDownRunner(FakeRunner):
+    """Fails the way a Gateway restart fails: the socket dies mid-turn."""
+
+    def draft(self, owner, dossier):
+        self.calls.append((owner, dossier))
+        raise RuntimeError(GATEWAY_TRANSPORT_ERROR)
+
+
+class BrokenRunner(FakeRunner):
+    def draft(self, owner, dossier):
+        self.calls.append((owner, dossier))
+        raise RuntimeError("Draft agent returned an unusable proposal")
 
 
 class FailingReplyChecker:
@@ -697,6 +718,134 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.get(item["mail_item_id"])["card_message_id"], "99",
         )
+
+    def _pending_revision(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Old reply"})
+        item = self.ledger.attach_card(
+            item["mail_item_id"], channel="telegram", account_id="primary",
+            chat_id="chat", message_id="card",
+        )
+        return self.ledger.transition(
+            item["mail_item_id"], MailState.REVISION_REQUESTED, actor="test",
+        )
+
+    def test_revision_transport_failure_stays_pending_with_its_card(self):
+        item = self._pending_revision()
+        with self.assertRaisesRegex(TransientAgentError, "still pending"):
+            self.dispatcher(GatewayDownRunner()).revise(
+                item["callback_token"], "Add a few times",
+                account_id="primary", chat_id="chat",
+            )
+        pending = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(pending["state"], MailState.REVISION_REQUESTED.value)
+        self.assertEqual(pending["card_message_id"], "card")
+        self.assertIn("gateway closed", pending["last_error"])
+
+        retried = self.dispatcher(FakeRunner()).revise(
+            item["callback_token"], "Add a few times",
+            account_id="primary", chat_id="chat",
+        )
+        self.assertEqual(retried["state"], MailState.DRAFT_PROPOSED.value)
+
+    def test_revision_agent_failure_is_still_terminal(self):
+        item = self._pending_revision()
+        with self.assertRaisesRegex(RuntimeError, "unusable proposal"):
+            self.dispatcher(BrokenRunner()).revise(
+                item["callback_token"], "Add a few times",
+                account_id="primary", chat_id="chat",
+            )
+        failed = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(failed["state"], MailState.ERROR.value)
+
+    def test_dispatch_transport_failure_requeues_for_the_next_cycle(self):
+        summary = self.dispatcher(GatewayDownRunner()).run()
+        self.assertEqual(summary.errors, 1)
+        requeued = self.ledger.get(self.item["mail_item_id"])
+        self.assertEqual(requeued["state"], MailState.DRAFT_REQUESTED.value)
+        self.assertIn("gateway closed", requeued["last_error"])
+
+        recovered = self.dispatcher(FakeRunner()).run()
+        self.assertEqual((recovered.drafted, recovered.errors), (1, 0))
+        self.assertEqual(
+            self.ledger.get(self.item["mail_item_id"])["state"],
+            MailState.DRAFT_PROPOSED.value,
+        )
+
+    def test_dispatch_agent_failure_is_still_terminal(self):
+        summary = self.dispatcher(BrokenRunner()).run()
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(
+            self.ledger.get(self.item["mail_item_id"])["state"],
+            MailState.ERROR.value,
+        )
+
+    def _expire_drafting_lease(self, mail_item_id):
+        stale = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        with self.ledger.transaction() as conn:
+            conn.execute(
+                "UPDATE mail_items SET updated_at = ? WHERE mail_item_id = ?",
+                (stale, mail_item_id),
+            )
+
+    def test_stale_revision_replays_the_operator_instructions(self):
+        item = self._pending_revision()
+        # A Gateway restart kills the drafting process itself, so nothing records
+        # the failure and the item is left holding an expired DRAFTING lease.
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.DRAFTING,
+            actor="operator:revision-command",
+            expected_states=[MailState.REVISION_REQUESTED],
+            patch={"card_message_id": None},
+            metadata={"instructions": "Add a few times, including Friday"},
+        )
+        self._expire_drafting_lease(item["mail_item_id"])
+
+        runner = FakeRunner()
+        notifier = FakeNotifier()
+        self.dispatcher(runner, notifier).run()
+
+        recovered = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(recovered["state"], MailState.DRAFT_PROPOSED.value)
+        self.assertEqual(recovered["card_message_id"], "99")
+        self.assertIn(
+            "OPERATOR REVISION INSTRUCTIONS\nAdd a few times, including Friday",
+            runner.calls[0][1],
+        )
+        self.assertIn("Old reply", runner.calls[0][1])
+        self.assertEqual(len(notifier.calls), 1)
+
+    def test_stale_revision_that_fails_again_is_left_pending(self):
+        item = self._pending_revision()
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.DRAFTING,
+            actor="operator:revision-command",
+            expected_states=[MailState.REVISION_REQUESTED],
+            patch={"card_message_id": None},
+            metadata={"instructions": "Add a few times, including Friday"},
+        )
+        self._expire_drafting_lease(item["mail_item_id"])
+
+        self.dispatcher(GatewayDownRunner()).run()
+
+        pending = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(pending["state"], MailState.REVISION_REQUESTED.value)
+        self.assertIn("gateway closed", pending["last_error"])
+
+    def test_stale_ordinary_draft_is_still_requeued(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        self._expire_drafting_lease(item["mail_item_id"])
+
+        runner = FakeRunner()
+        self.dispatcher(runner).run()
+
+        recovered = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(recovered["state"], MailState.DRAFT_PROPOSED.value)
+        self.assertNotIn("OPERATOR REVISION INSTRUCTIONS", runner.calls[0][1])
 
     def test_revision_rejects_a_chat_that_does_not_match_the_card(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])

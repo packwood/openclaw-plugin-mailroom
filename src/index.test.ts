@@ -1116,6 +1116,29 @@ describe("Mailroom hardening", () => {
     expect(invalidInstructionsMessage("shorten")).toBeNull();
   });
 
+  it("keeps a gateway-transport revision open for the operator to retry", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET state='REVISION_REQUESTED'").run();
+    db.close();
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Add a few times.", senderId: "123456789",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary", conversationId: "123456789", senderId: "123456789",
+    }, cfgWith(path, {
+      revisionRunner: async () => ({
+        ok: false, retryable: true,
+        error: "GatewayTransportError: gateway closed (1006 abnormal closure)",
+      }),
+    }) as any);
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toContain("still pending");
+    expect(result?.text).toContain("reply to the revision prompt again");
+    expect(result?.text).not.toContain("Revision failed safely");
+    expect(result?.text).not.toContain("GatewayTransportError");
+  });
+
   it("rejects revision replies when the gateway marks the sender unauthorized", async () => {
     const path = fixture();
     const db = new DatabaseSync(path);

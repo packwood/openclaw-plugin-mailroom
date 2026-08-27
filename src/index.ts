@@ -88,6 +88,11 @@ function revisionResultMessage(result: Record<string, any>): string {
   if (result.ok === true) {
     return "✅ Revised proposal drafted. A new approval card was sent.";
   }
+  if (result.retryable === true) {
+    if (result.error) logInternalError("revision could not reach the drafting agent", result.error);
+    return "⚠️ Mailroom could not reach the drafting agent, so nothing was changed. "
+      + "This revision is still pending — reply to the revision prompt again to retry.";
+  }
   if (result.error) logInternalError("revision command failed", result.error);
   return `Revision failed safely; nothing was sent. ${LOCAL_ERROR_NOTE}`;
 }
