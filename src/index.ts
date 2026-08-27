@@ -97,6 +97,29 @@ function revisionResultMessage(result: Record<string, any>): string {
   return `Revision failed safely; nothing was sent. ${LOCAL_ERROR_NOTE}`;
 }
 
+const STALE_REVISION_PROMPT =
+  "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.";
+
+/**
+ * Explain why a revision prompt that still looks answerable no longer is.
+ *
+ * The token stays valid for the life of the item, so a superseded prompt sits in
+ * the chat inviting a reply forever. Only reached once every account, chat,
+ * thread, and sender check has passed, so it tells an authorized operator what
+ * happened rather than implying the reply was rejected as untrusted.
+ */
+export function supersededRevisionMessage(state: string): string {
+  if (state === "DRAFTING" || state === "DRAFT_REQUESTED") {
+    return "Mailroom is already drafting a revision for this email. Nothing was changed; "
+      + "the new approval card will arrive in this chat when it is ready.";
+  }
+  if (state === "DRAFT_PROPOSED" || state === "OUTLOOK_DRAFTED" || state === "SEND_APPROVAL_PENDING") {
+    return "This revision prompt was superseded by a newer Mailroom card for the same email. "
+      + "Nothing was changed; use the buttons on the newest card in this chat.";
+  }
+  return `This email is no longer awaiting a revision (${state}). Nothing was changed.`;
+}
+
 export function invalidInstructionsMessage(instructions: string): string | null {
   if (!instructions) return "Revision instructions were empty. Nothing was changed.";
   if (instructions.length > 4096) {
@@ -873,10 +896,12 @@ export async function handleRevisionReply(
   let item: Item | undefined;
   try {
     db = openDb(cfg.dbPath);
+    // Deliberately not filtered by state: an item that has moved on still owes
+    // the operator an explanation, and every check below is applied first.
     item = db.prepare(`
       SELECT * FROM mail_items
       WHERE callback_token = ? AND run_mode = 'production'
-        AND state = 'REVISION_REQUESTED' AND card_channel = 'telegram'
+        AND card_channel = 'telegram'
         AND card_account_id = ? AND card_chat_id = ?
     `).get(token, accountId, chatId) as Item | undefined;
   } catch (error: any) {
@@ -888,20 +913,12 @@ export async function handleRevisionReply(
   } finally {
     db?.close();
   }
-  if (!item) {
-    return {
-      handled: true,
-      text: "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.",
-    };
-  }
+  if (!item) return { handled: true, text: STALE_REVISION_PROMPT };
   const cardThreadId = item.card_thread_id == null || String(item.card_thread_id) === ""
     ? undefined
     : String(item.card_thread_id);
   if (cardThreadId && conversation.threadId !== cardThreadId) {
-    return {
-      handled: true,
-      text: "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.",
-    };
+    return { handled: true, text: STALE_REVISION_PROMPT };
   }
   const cardChatId = String(item.card_chat_id);
   if (isTelegramGroupChat(cardChatId)) {
@@ -916,6 +933,9 @@ export async function handleRevisionReply(
       handled: true,
       text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed.",
     };
+  }
+  if (item.state !== "REVISION_REQUESTED") {
+    return { handled: true, text: supersededRevisionMessage(String(item.state)) };
   }
 
   try {
@@ -956,10 +976,12 @@ export async function handleRevisionCommand(
   let item: Item | undefined;
   try {
     db = openDb(cfg.dbPath);
+    // Not filtered by state; the chat, thread, and sender checks below still gate
+    // everything, and a superseded token deserves an explanation over a refusal.
     item = db.prepare(`
       SELECT * FROM mail_items
       WHERE callback_token = ? AND run_mode = 'production'
-        AND state = 'REVISION_REQUESTED' AND card_channel = 'telegram'
+        AND card_channel = 'telegram'
         AND card_account_id = ?
     `).get(token, accountId) as Item | undefined;
   } catch (error: any) {
@@ -995,6 +1017,9 @@ export async function handleRevisionCommand(
     if (senderId !== cardChatId) {
       return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
     }
+  }
+  if (item.state !== "REVISION_REQUESTED") {
+    return { text: supersededRevisionMessage(String(item.state)) };
   }
   try {
     return {

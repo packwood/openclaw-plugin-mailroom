@@ -292,7 +292,11 @@ describe("Mailroom interactive handler", () => {
       accountId: "primary", conversationId: "123456789", senderId: "123456789",
     }, cfg);
     expect(stale).toMatchObject({ handled: true });
-    expect(stale?.text).toContain("stale");
+    // Every account/chat/sender check passed, so this is a superseded prompt,
+    // not an untrusted one — say which, and never run the revision.
+    expect(stale?.text).toContain("superseded");
+    expect(stale?.text).toContain("newest card");
+    expect(calls).toEqual([]);
 
     const db = new DatabaseSync(path);
     db.prepare("UPDATE mail_items SET state='REVISION_REQUESTED'").run();
@@ -1275,15 +1279,49 @@ describe("Mailroom hardening", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("rejects /mr-revise for a token no longer awaiting revision", async () => {
+  it("explains a /mr-revise token that is no longer awaiting revision", async () => {
     const path = fixture();
     const calls: any[] = [];
     const result = await handleRevisionCommand({
       isAuthorizedSender: true, args: "token_1234 Shorten it.",
       accountId: "primary", senderId: "123456789",
     }, cfgWith(path, { revisionRunner: async (...args: any[]) => { calls.push(args); return { ok: true }; } }) as any);
-    expect(result.text).toContain("stale or does not match this bot");
+    expect(result.text).toContain("superseded");
+    expect(result.text).not.toContain("stale or does not match");
     expect(calls).toEqual([]);
+  });
+
+  it("tells the operator when a revision it asked for is already drafting", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET state='DRAFTING'").run();
+    db.close();
+    const calls: any[] = [];
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "123456789",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary", conversationId: "123456789", senderId: "123456789",
+    }, cfgWith(path, { revisionRunner: async (...args: any[]) => { calls.push(args); return { ok: true }; } }) as any);
+    expect(result?.text).toContain("already drafting a revision");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps the strict refusal for a superseded prompt replied to from the wrong thread", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare(`UPDATE mail_items SET state='DRAFT_PROPOSED',
+      card_chat_id='-1003782061282', card_thread_id='432'`).run();
+    db.close();
+    const result = await handleRevisionReply({
+      channel: "telegram", content: "Shorten it.", senderId: "99887766",
+      replyToBody: "Mailroom revision token: token_1234",
+    }, {
+      accountId: "primary", conversationId: "-1003782061282:topic:999", senderId: "99887766",
+    }, cfgWith(path, {}) as any);
+    // A mismatched topic learns nothing about the item's state.
+    expect(result?.text).toContain("stale or does not match this bot and chat");
+    expect(result?.text).not.toContain("superseded");
   });
 
   it("records ERROR when the Outlook draft creator throws", async () => {
