@@ -28,6 +28,10 @@ describe("Mailroom engine CLI forwarding", () => {
       dbPath: "/state/mailroom.db",
       profilesPath: "/state/profiles/current.json",
       telegramChatId: "private-chat",
+      telegramThreadId: "12",
+      telegramDestinations: {
+        billy: { chatId: "-1000000000001", threadId: "21" },
+      },
       routingReviewAgentId: "main",
       routingReviewTelegramAccountId: "default",
       accounts: { work: "operator@example.com" },
@@ -36,6 +40,10 @@ describe("Mailroom engine CLI forwarding", () => {
       "--account", "operator@example.com",
       "--profiles-dir", "/state/profiles",
       "--telegram-chat-id", "private-chat",
+      "--telegram-thread-id", "12",
+      "--telegram-destinations", JSON.stringify({
+        billy: { chatId: "-1000000000001", threadId: "21" },
+      }),
       "--routing-review-agent-id", "main",
       "--routing-review-telegram-account-id", "default",
     ]);
@@ -44,15 +52,21 @@ describe("Mailroom engine CLI forwarding", () => {
   it("preserves explicit operational overrides", () => {
     expect(buildEngineArgs({
       telegramChatId: "configured-chat",
+      telegramThreadId: "12",
+      telegramDestinations: { billy: { chatId: "-1000000000001" } },
       accounts: { work: "operator@example.com" },
     }, "dispatch", [
       "--account=other@example.com", "--telegram-chat-id", "explicit-chat",
+      "--telegram-thread-id", "99",
+      "--telegram-destinations", "{\"recon\":{\"chatId\":\"-1000000000002\"}}",
       "--routing-review-agent-id=coordinator",
       "--routing-review-telegram-account-id", "orchestrator",
       "--profiles-dir=/explicit",
     ])).toEqual([
       "dispatch", "--account=other@example.com",
       "--telegram-chat-id", "explicit-chat",
+      "--telegram-thread-id", "99",
+      "--telegram-destinations", "{\"recon\":{\"chatId\":\"-1000000000002\"}}",
       "--routing-review-agent-id=coordinator",
       "--routing-review-telegram-account-id", "orchestrator",
       "--profiles-dir=/explicit",

@@ -21,20 +21,116 @@ from .models import Disposition, MailState
 from .reply_guard import ReplyChecker
 from .router import _current_message_text
 
+_UNSET = object()
+
+
+class TransientAgentError(RuntimeError):
+    """A drafting turn that never reached the agent, so the work can be retried."""
+
+
+# OpenClaw Gateway transport failures: the socket died before a draft came back.
+# Restarts and drains land here; agent-level failures (timeouts, policy rejections)
+# deliberately do not, because those turns may still be live.
+_TRANSIENT_AGENT_MARKERS = (
+    "gatewaytransporterror",
+    "gateway closed",
+    "gateway is draining",
+    "abnormal closure",
+    "socket hang up",
+    "econnrefused",
+    "connection refused",
+    "gateway is not running",
+)
+
+
+def _is_transient_agent_failure(exc: Exception) -> bool:
+    if isinstance(exc, (DraftPolicyError, subprocess.TimeoutExpired)):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_AGENT_MARKERS)
+
 
 class DraftRunner(Protocol):
     def draft(self, owner: str, dossier: str) -> dict[str, Any]: ...
 
 
 class CardNotifier(Protocol):
-    def send(self, *, account_id: str, chat_id: str, text: str, token: str) -> str: ...
+    def send(
+        self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None = None,
+    ) -> str: ...
     def send_review(
         self, *, account_id: str, chat_id: str, text: str, token: str,
-        owners: tuple[str, ...],
+        owners: tuple[str, ...], thread_id: str | None = None,
     ) -> str: ...
     def send_send_approval(
         self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None = None,
     ) -> str: ...
+
+
+@dataclass(frozen=True)
+class TelegramDestination:
+    chat_id: str
+    thread_id: str | None = None
+
+
+def parse_telegram_destinations(raw: str | None) -> dict[str, TelegramDestination]:
+    """Parse the plugin's per-owner Telegram destination JSON."""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Mailroom --telegram-destinations is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Mailroom --telegram-destinations must be a JSON object mapping "
+            "OpenClaw agent ids to destinations"
+        )
+    destinations: dict[str, TelegramDestination] = {}
+    for owner, value in payload.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"Mailroom --telegram-destinations[{owner}] must be an object "
+                "with a non-empty chatId"
+            )
+        chat_id = str(value.get("chatId") or "").strip()
+        if not chat_id:
+            raise ValueError(
+                f"Mailroom --telegram-destinations[{owner}] requires a non-empty chatId"
+            )
+        thread_raw = value.get("threadId")
+        if thread_raw is None:
+            thread_id = None
+        else:
+            thread_id = str(thread_raw).strip()
+            if not thread_id:
+                raise ValueError(
+                    f"Mailroom --telegram-destinations[{owner}] threadId must be "
+                    "a non-empty string when set"
+                )
+        destinations[str(owner)] = TelegramDestination(
+            chat_id=chat_id, thread_id=thread_id,
+        )
+    return destinations
+
+
+def resolve_telegram_destination(
+    destinations: dict[str, TelegramDestination],
+    *,
+    owner: str | None,
+    fallback: TelegramDestination,
+    review_agent_id: str,
+) -> TelegramDestination:
+    """Resolve a card destination from draft_owner, else routing-review agent, else fallback."""
+    key = str(owner or "").strip() or review_agent_id
+    match = destinations.get(key) if key else None
+    if match is not None:
+        return match
+    return fallback
 
 
 class OpenClawAgentRunner:
@@ -185,8 +281,9 @@ def _routing_owner_callback_ref(owner: str) -> str:
 
 
 class TelegramCardNotifier:
-    def __init__(self, executable: str = "openclaw"):
+    def __init__(self, executable: str = "openclaw", thread_id: str | None = None):
         self.executable = executable
+        self.thread_id = str(thread_id) if thread_id else None
         self._telegram_accounts: set[str] | None = None
 
     def resolve_account_id(self, requested: str, fallback: str) -> str:
@@ -214,7 +311,10 @@ class TelegramCardNotifier:
             return fallback
         return requested
 
-    def send(self, *, account_id: str, chat_id: str, text: str, token: str) -> str:
+    def send(
+        self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None | object = _UNSET,
+    ) -> str:
         presentation = {
             "blocks": [{
                 "type": "buttons",
@@ -228,11 +328,14 @@ class TelegramCardNotifier:
                 ],
             }],
         }
-        return self._send(account_id=account_id, chat_id=chat_id, text=text, presentation=presentation)
+        return self._send(
+            account_id=account_id, chat_id=chat_id, text=text,
+            presentation=presentation, thread_id=thread_id,
+        )
 
     def send_review(
         self, *, account_id: str, chat_id: str, text: str, token: str,
-        owners: tuple[str, ...],
+        owners: tuple[str, ...], thread_id: str | None | object = _UNSET,
     ) -> str:
         buttons = [
             {
@@ -248,9 +351,11 @@ class TelegramCardNotifier:
         return self._send(
             account_id=account_id, chat_id=chat_id, text=text,
             presentation={"blocks": [{"type": "buttons", "buttons": buttons}]},
+            thread_id=thread_id,
         )
     def send_send_approval(
         self, *, account_id: str, chat_id: str, text: str, token: str,
+        thread_id: str | None | object = _UNSET,
     ) -> str:
         presentation = {"blocks": [{"type": "buttons", "buttons": [
             {"label": "Send", "callback_data": f"mailroom:send.{token}", "style": "success"},
@@ -260,17 +365,29 @@ class TelegramCardNotifier:
             {"label": "New Email Check", "callback_data": f"mailroom:new-email-check.{token}"},
             {"label": "Cancel", "callback_data": f"mailroom:cancel.{token}", "style": "danger"},
         ]}]}
-        return self._send(account_id=account_id, chat_id=chat_id, text=text, presentation=presentation)
+        return self._send(
+            account_id=account_id, chat_id=chat_id, text=text,
+            presentation=presentation, thread_id=thread_id,
+        )
 
     def _send(
         self, *, account_id: str, chat_id: str, text: str, presentation: dict[str, Any],
+        thread_id: str | None | object = _UNSET,
     ) -> str:
+        command = [
+            self.executable, "message", "send", "--channel", "telegram",
+            "--account", account_id, "--target", chat_id,
+        ]
+        resolved_thread = self.thread_id if thread_id is _UNSET else (
+            str(thread_id) if thread_id else None
+        )
+        if resolved_thread:
+            command.extend(["--thread-id", resolved_thread])
+        command.extend([
+            "--message", text, "--presentation", json.dumps(presentation), "--json",
+        ])
         completed = subprocess.run(
-            [
-                self.executable, "message", "send", "--channel", "telegram",
-                "--account", account_id, "--target", chat_id,
-                "--message", text, "--presentation", json.dumps(presentation), "--json",
-            ],
+            command,
             text=True, capture_output=True, timeout=60,
         )
         if completed.returncode != 0:
@@ -301,6 +418,8 @@ class DraftDispatcher:
         notifier: CardNotifier,
         *,
         telegram_chat_id: str,
+        telegram_thread_id: str | None = None,
+        telegram_destinations: dict[str, TelegramDestination] | None = None,
         review_agent_id: str = "main",
         review_account_id: str = "default",
         review_owners: tuple[str, ...] = (),
@@ -315,6 +434,8 @@ class DraftDispatcher:
         self.runner = runner
         self.notifier = notifier
         self.telegram_chat_id = telegram_chat_id
+        self.telegram_thread_id = str(telegram_thread_id) if telegram_thread_id else None
+        self.telegram_destinations = telegram_destinations or {}
         self.review_agent_id = review_agent_id
         self.review_account_id = review_account_id
         self.review_owners = review_owners
@@ -331,6 +452,7 @@ class DraftDispatcher:
         released_deferred = len(self.ledger.release_due_deferred(mailbox=self.mailbox))
         drafted = cards_sent = review_cards_sent = replied_elsewhere = no_reply_dropped = errors = 0
         self._recover_stale_drafting(limit=limit)
+        self._recover_stale_outlook_drafting(limit=limit)
 
         reviews = self.ledger.list_items(
             state=MailState.ROUTING_REVIEW, run_mode="production",
@@ -341,14 +463,15 @@ class DraftDispatcher:
             if item.get("card_message_id"):
                 continue
             try:
+                dest = self._card_destination(None)
                 message_id = self.notifier.send_review(
-                    account_id=self.review_account_id, chat_id=self.telegram_chat_id,
+                    account_id=self.review_account_id, chat_id=dest.chat_id,
                     text=_format_review_card(item), token=item["callback_token"],
-                    owners=self.review_owners,
+                    owners=self.review_owners, thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=self.review_account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 review_cards_sent += 1
             except Exception as exc:
@@ -428,9 +551,16 @@ class DraftDispatcher:
                 errors += 1
                 if draft_version is None:
                     continue
+                # A dropped Gateway connection produced no draft, so return the item
+                # to the queue for the next cycle instead of stranding it in ERROR.
+                recovery = (
+                    MailState.DRAFT_REQUESTED
+                    if _is_transient_agent_failure(exc)
+                    else MailState.ERROR
+                )
                 try:
                     self.ledger.transition(
-                        item["mail_item_id"], MailState.ERROR, actor="dispatcher",
+                        item["mail_item_id"], recovery, actor="dispatcher",
                         expected_states=[MailState.DRAFTING],
                         expected_version=draft_version,
                         patch={"last_error": str(exc)[:2000]},
@@ -450,13 +580,15 @@ class DraftDispatcher:
                     continue
                 proposal = json.loads(item["proposal_json"])
                 account_id = self._card_account_id(item["draft_owner"])
+                dest = self._card_destination(item.get("draft_owner"))
                 message_id = self.notifier.send(
-                    account_id=account_id, chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=dest.chat_id,
                     text=_format_card(item, proposal), token=item["callback_token"],
+                    thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 cards_sent += 1
             except Exception as exc:
@@ -475,13 +607,15 @@ class DraftDispatcher:
                 if item.get("card_message_id"):
                     continue
                 account_id = self._card_account_id(item["draft_owner"])
+                dest = self._card_destination(item.get("draft_owner"))
                 message_id = self.notifier.send_send_approval(
-                    account_id=account_id, chat_id=self.telegram_chat_id,
+                    account_id=account_id, chat_id=dest.chat_id,
                     text=_format_send_approval(item), token=item["callback_token"],
+                    thread_id=dest.thread_id,
                 )
                 self.ledger.attach_card(
                     item["mail_item_id"], channel="telegram", account_id=account_id,
-                    chat_id=self.telegram_chat_id, message_id=message_id,
+                    chat_id=dest.chat_id, message_id=message_id, thread_id=dest.thread_id,
                 )
                 cards_sent += 1
             except Exception as exc:
@@ -493,20 +627,54 @@ class DraftDispatcher:
             no_reply_dropped=no_reply_dropped, errors=errors,
         )
 
-    def _recover_stale_drafting(self, *, limit: int) -> None:
+    def _expired_lease_items(self, state: MailState, *, limit: int) -> list[dict[str, Any]]:
+        """Items holding a working state past its lease, so their worker is gone."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.drafting_lease_seconds)
-        stale = self.ledger.list_items(
-            state=MailState.DRAFTING, run_mode="production",
+        expired = []
+        for item in self.ledger.list_items(
+            state=state, run_mode="production",
             mailbox=self.mailbox, limit=limit, order_by_priority=True,
-        )
-        for item in stale:
+        ):
             try:
                 updated_at = datetime.fromisoformat(str(item.get("updated_at") or ""))
                 if updated_at.tzinfo is None:
                     updated_at = updated_at.replace(tzinfo=timezone.utc)
             except ValueError:
                 updated_at = datetime.min.replace(tzinfo=timezone.utc)
-            if updated_at >= cutoff:
+            if updated_at < cutoff:
+                expired.append(item)
+        return expired
+
+    def _recover_stale_outlook_drafting(self, *, limit: int) -> None:
+        """Return an interrupted Outlook draft creation to the approval gate.
+
+        Unlike prose drafting, this state has an outward side effect: the plugin
+        asks Outlook to create the reply draft. Recovering to DRAFT_PROPOSED with
+        no card makes the dispatcher re-send the approval card, and the approve
+        path discards any draft recorded for the interrupted attempt before
+        creating a new one, so the retry cannot leave a duplicate behind.
+        """
+        for item in self._expired_lease_items(MailState.OUTLOOK_DRAFTING, limit=limit):
+            try:
+                self.ledger.transition(
+                    item["mail_item_id"], MailState.DRAFT_PROPOSED,
+                    actor="dispatcher:stale-outlook-draft-recovery",
+                    expected_states=[MailState.OUTLOOK_DRAFTING],
+                    patch={
+                        "card_message_id": None,
+                        "last_error": (
+                            "Recovered an expired Outlook drafting lease; "
+                            "the approval card was re-sent."
+                        ),
+                    },
+                )
+            except ConcurrentUpdate:
+                continue
+
+    def _recover_stale_drafting(self, *, limit: int) -> None:
+        for item in self._expired_lease_items(MailState.DRAFTING, limit=limit):
+            instructions = self.ledger.revision_instructions_in_flight(item["mail_item_id"])
+            if instructions and self._resume_stale_revision(item, instructions):
                 continue
             try:
                 self.ledger.transition(
@@ -518,12 +686,59 @@ class DraftDispatcher:
             except ConcurrentUpdate:
                 continue
 
+    def _resume_stale_revision(self, item: dict[str, Any], instructions: str) -> bool:
+        """Replay a revision whose drafting turn died along with its process.
+
+        Requeuing such an item as an ordinary draft would silently downgrade the
+        operator's revision to a fresh draft, discarding both the instructions and
+        the draft they were revising. Returns False when the item cannot be
+        replayed, so the caller falls back to the ordinary stale-draft requeue.
+        """
+        account_id = item.get("card_account_id")
+        chat_id = item.get("card_chat_id")
+        if not account_id or not chat_id:
+            return False
+        try:
+            self.ledger.transition(
+                item["mail_item_id"], MailState.REVISION_REQUESTED,
+                actor="dispatcher:stale-revision-recovery",
+                expected_states=[MailState.DRAFTING],
+                patch={"last_error": "Recovered an expired revision lease; retrying the revision."},
+                metadata={"instructions": instructions[:2000]},
+            )
+        except ConcurrentUpdate:
+            # Another cycle already owns this item; leave it to that owner.
+            return True
+        try:
+            self.revise(
+                item["callback_token"], instructions,
+                account_id=str(account_id), chat_id=str(chat_id),
+            )
+        except Exception as exc:
+            # revise() already recorded the outcome: still pending after a transport
+            # failure, or ERROR after a real one. Either way the ledger holds the cause.
+            self._record_error(item["mail_item_id"], exc)
+        return True
+
     def _record_error(self, mail_item_id: str, exc: Exception) -> None:
         with self.ledger.transaction() as conn:
             conn.execute(
                 "UPDATE mail_items SET last_error = ?, updated_at = ? WHERE mail_item_id = ?",
                 (str(exc)[:2000], _utcnow(), mail_item_id),
             )
+
+    def _fallback_destination(self) -> TelegramDestination:
+        return TelegramDestination(
+            chat_id=self.telegram_chat_id, thread_id=self.telegram_thread_id,
+        )
+
+    def _card_destination(self, owner: str | None) -> TelegramDestination:
+        return resolve_telegram_destination(
+            self.telegram_destinations,
+            owner=owner,
+            fallback=self._fallback_destination(),
+            review_agent_id=self.review_agent_id,
+        )
 
     def _card_account_id(self, owner: str) -> str:
         # OpenClaw's Orchestrator agent is named "main", while its Telegram
@@ -581,6 +796,7 @@ class DraftDispatcher:
                     },
                 )
         previous = json.loads(item.get("proposal_json") or "{}")
+        prior_card_message_id = item.get("card_message_id")
         requested = self.ledger.transition(
             item["mail_item_id"], MailState.DRAFTING, actor="operator:revision-command",
             expected_states=[MailState.REVISION_REQUESTED],
@@ -593,6 +809,13 @@ class DraftDispatcher:
                 _build_revision_dossier(requested, previous, instructions),
             )
         except Exception as exc:
+            if _is_transient_agent_failure(exc) and self._reopen_revision(
+                requested, prior_card_message_id, exc,
+            ):
+                raise TransientAgentError(
+                    f"Revision could not reach the drafting agent; "
+                    f"the request is still pending: {exc}"
+                ) from exc
             self.ledger.transition(
                 requested["mail_item_id"], MailState.ERROR, actor="revision-dispatcher",
                 expected_states=[MailState.DRAFTING],
@@ -620,15 +843,53 @@ class DraftDispatcher:
             requested["mail_item_id"], proposal,
             expected_version=requested["version"],
         )
+        stored_chat = proposed.get("card_chat_id")
+        if stored_chat:
+            chat_id = str(stored_chat)
+            stored_thread = proposed.get("card_thread_id")
+            thread_id = str(stored_thread) if stored_thread else None
+        else:
+            dest = self._card_destination(proposed.get("draft_owner"))
+            chat_id = dest.chat_id
+            thread_id = dest.thread_id
         message_id = self.notifier.send(
-            account_id=account_id, chat_id=proposed["card_chat_id"] or self.telegram_chat_id,
+            account_id=account_id, chat_id=chat_id,
             text=_format_card(proposed, proposal), token=proposed["callback_token"],
+            thread_id=thread_id,
         )
         return self.ledger.attach_card(
             proposed["mail_item_id"], channel="telegram", account_id=account_id,
-            chat_id=proposed["card_chat_id"] or self.telegram_chat_id, message_id=message_id,
+            chat_id=chat_id, message_id=message_id, thread_id=thread_id,
             actor="revision-notifier",
         )
+
+    def _reopen_revision(
+        self, requested: dict[str, Any], card_message_id: str | None, exc: Exception,
+    ) -> bool:
+        """Hand a transport-failed revision back to the operator instead of ERROR.
+
+        The drafting turn is prose-only and performs no outward action, so a dropped
+        Gateway connection leaves nothing half-done. Restoring REVISION_REQUESTED and
+        the original card keeps the approval card live and lets the operator retry by
+        replying to the same revision prompt. Returns False when the ledger moved on,
+        so the caller can fall back to the terminal ERROR transition.
+        """
+        try:
+            self.ledger.transition(
+                requested["mail_item_id"], MailState.REVISION_REQUESTED,
+                actor="revision-dispatcher:transport-retry",
+                expected_states=[MailState.DRAFTING],
+                expected_version=requested["version"],
+                patch={
+                    "card_message_id": card_message_id,
+                    "last_error": str(exc)[:2000],
+                },
+                metadata={"retryable": True},
+            )
+            return True
+        except Exception:
+            # The ledger moved on underneath us; the caller records the real cause.
+            return False
 
     def _ensure_attachments(self, item: dict[str, Any]) -> dict[str, Any]:
         if item.get("attachments_json") is not None:

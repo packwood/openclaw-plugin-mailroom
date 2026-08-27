@@ -22,11 +22,19 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+export type TelegramDestination = {
+  chatId: string;
+  threadId?: string;
+};
+
 type Config = {
   dbPath: string;
   pythonPath: string;
   pythonExecutable?: string;
   telegramChatId: string;
+  telegramThreadId?: string;
+  telegramDestinations?: Record<string, TelegramDestination>;
+  revisionApprovers?: string[];
   routingReviewAgentId: string;
   routingReviewTelegramAccountId: string;
   reviewOwners: string[];
@@ -80,8 +88,36 @@ function revisionResultMessage(result: Record<string, any>): string {
   if (result.ok === true) {
     return "✅ Revised proposal drafted. A new approval card was sent.";
   }
+  if (result.retryable === true) {
+    if (result.error) logInternalError("revision could not reach the drafting agent", result.error);
+    return "⚠️ Mailroom could not reach the drafting agent, so nothing was changed. "
+      + "This revision is still pending — reply to the revision prompt again to retry.";
+  }
   if (result.error) logInternalError("revision command failed", result.error);
   return `Revision failed safely; nothing was sent. ${LOCAL_ERROR_NOTE}`;
+}
+
+const STALE_REVISION_PROMPT =
+  "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.";
+
+/**
+ * Explain why a revision prompt that still looks answerable no longer is.
+ *
+ * The token stays valid for the life of the item, so a superseded prompt sits in
+ * the chat inviting a reply forever. Only reached once every account, chat,
+ * thread, and sender check has passed, so it tells an authorized operator what
+ * happened rather than implying the reply was rejected as untrusted.
+ */
+export function supersededRevisionMessage(state: string): string {
+  if (state === "DRAFTING" || state === "DRAFT_REQUESTED") {
+    return "Mailroom is already drafting a revision for this email. Nothing was changed; "
+      + "the new approval card will arrive in this chat when it is ready.";
+  }
+  if (state === "DRAFT_PROPOSED" || state === "OUTLOOK_DRAFTED" || state === "SEND_APPROVAL_PENDING") {
+    return "This revision prompt was superseded by a newer Mailroom card for the same email. "
+      + "Nothing was changed; use the buttons on the newest card in this chat.";
+  }
+  return `This email is no longer awaiting a revision (${state}). Nothing was changed.`;
 }
 
 export function invalidInstructionsMessage(instructions: string): string | null {
@@ -96,10 +132,108 @@ export function invalidInstructionsMessage(instructions: string): string | null 
   return null;
 }
 
-function resolveConfig(raw: any): Config {
+const TOPIC_CONVERSATION = /^(.*):topic:(\d+)$/;
+
+export function parseTelegramConversationId(
+  conversationId: string,
+): { chatId: string; threadId?: string } {
+  const value = String(conversationId || "");
+  const match = value.match(TOPIC_CONVERSATION);
+  if (match) return { chatId: match[1], threadId: match[2] };
+  return { chatId: value };
+}
+
+function isTelegramGroupChat(chatId: string): boolean {
+  return String(chatId).startsWith("-");
+}
+
+function groupRevisionAuthorized(ctx: Record<string, any>): boolean {
+  return ctx.auth?.isAuthorizedSender === true || ctx.isAuthorizedSender === true;
+}
+
+function parseRevisionApprovers(raw: unknown, telegramChatId: string): string[] {
+  if (raw == null) {
+    return telegramChatId && !isTelegramGroupChat(telegramChatId) ? [telegramChatId] : [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error("Mailroom revisionApprovers must be an array of non-empty strings");
+  }
+  return raw.map((value, index) => {
+    const id = String(value ?? "").trim();
+    if (!id) {
+      throw new Error(`Mailroom revisionApprovers[${index}] must be a non-empty string`);
+    }
+    return id;
+  });
+}
+
+function resolvedRevisionApprovers(cfg: Config): string[] {
+  if (cfg.revisionApprovers !== undefined) return cfg.revisionApprovers;
+  return parseRevisionApprovers(undefined, String(cfg.telegramChatId || ""));
+}
+
+function groupRevisionReplyAuthorized(
+  ctx: Record<string, any>, senderId: string, approvers: string[],
+): boolean {
+  if (groupRevisionAuthorized(ctx)) return true;
+  return approvers.includes(senderId);
+}
+
+export function resolveTelegramDestination(
+  destinations: Record<string, TelegramDestination> | undefined,
+  owner: string | null | undefined,
+  fallback: TelegramDestination,
+  reviewAgentId: string,
+): TelegramDestination {
+  const key = String(owner || "").trim() || reviewAgentId;
+  const match = key ? destinations?.[key] : undefined;
+  if (match?.chatId) return { chatId: match.chatId, threadId: match.threadId };
+  return { chatId: fallback.chatId, threadId: fallback.threadId };
+}
+
+function parseTelegramDestinations(raw: unknown): Record<string, TelegramDestination> {
+  if (raw == null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      "Mailroom telegramDestinations must be an object mapping OpenClaw agent ids to destinations",
+    );
+  }
+  const destinations: Record<string, TelegramDestination> = {};
+  for (const [agentId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(
+        `Mailroom telegramDestinations.${agentId} must be an object with a non-empty chatId`,
+      );
+    }
+    const entry = value as Record<string, unknown>;
+    const chatId = String(entry.chatId ?? "").trim();
+    if (!chatId) {
+      throw new Error(
+        `Mailroom telegramDestinations.${agentId} requires a non-empty chatId`,
+      );
+    }
+    const destination: TelegramDestination = { chatId };
+    if (entry.threadId != null) {
+      const threadId = String(entry.threadId).trim();
+      if (!threadId) {
+        throw new Error(
+          `Mailroom telegramDestinations.${agentId} threadId must be a non-empty string when set`,
+        );
+      }
+      destination.threadId = threadId;
+    }
+    destinations[String(agentId)] = destination;
+  }
+  return destinations;
+}
+
+export function resolveConfig(raw: any): Config {
   const telegramChatId = String(
     raw?.telegramChatId || process.env.MAILROOM_TELEGRAM_CHAT_ID || "",
   );
+  const telegramThreadId = raw?.telegramThreadId ? String(raw.telegramThreadId) : undefined;
+  const telegramDestinations = parseTelegramDestinations(raw?.telegramDestinations);
+  const revisionApprovers = parseRevisionApprovers(raw?.revisionApprovers, telegramChatId);
   const routingOwnerMode = raw?.routingOwnerMode === undefined
     ? "all"
     : String(raw.routingOwnerMode);
@@ -123,6 +257,9 @@ function resolveConfig(raw: any): Config {
     pythonPath: raw?.pythonPath || fileURLToPath(new URL("../python", import.meta.url)),
     pythonExecutable: String(raw?.pythonExecutable || "python3"),
     telegramChatId,
+    telegramThreadId,
+    telegramDestinations,
+    revisionApprovers,
     routingReviewAgentId: String(raw?.routingReviewAgentId || "main"),
     routingReviewTelegramAccountId: String(
       raw?.routingReviewTelegramAccountId || "default",
@@ -688,16 +825,24 @@ function revisionTokenFromReply(replyBody: unknown): string | null {
 
 async function runRevision(
   cfg: Config, token: string, instructions: string, accountId: string, chatId: string,
+  threadId?: string,
 ): Promise<Record<string, any>> {
   if (cfg.revisionRunner) return cfg.revisionRunner(token, instructions, accountId, chatId);
   if (!chatId) throw new Error("Mailroom could not resolve the approval chat for this revision");
+  const args = [
+    "-m", "mailroom.cli", "--db", cfg.dbPath,
+    "revise", token, instructions,
+    "--account-id", accountId, "--telegram-chat-id", chatId,
+  ];
+  const resolvedThread = threadId || cfg.telegramThreadId;
+  if (resolvedThread) args.push("--telegram-thread-id", resolvedThread);
+  const destinations = cfg.telegramDestinations;
+  if (destinations && Object.keys(destinations).length) {
+    args.push("--telegram-destinations", JSON.stringify(destinations));
+  }
   const { stdout } = await execFileAsync(
     cfg.pythonExecutable || "python3",
-    [
-      "-m", "mailroom.cli", "--db", cfg.dbPath,
-      "revise", token, instructions,
-      "--account-id", accountId, "--telegram-chat-id", chatId,
-    ],
+    args,
     {
       timeout: 660000,
       env: { ...process.env, PYTHONPATH: cfg.pythonPath },
@@ -725,7 +870,8 @@ export async function handleRevisionReply(
   if (!token) return;
 
   const accountId = String(ctx.accountId || "");
-  const chatId = String(ctx.conversationId || "");
+  const conversation = parseTelegramConversationId(String(ctx.conversationId || ""));
+  const chatId = conversation.chatId;
   const senderId = String(event.senderId || ctx.senderId || "");
   const instructions = String(event.content || "").trim();
   if (!accountId || !chatId || !senderId) {
@@ -750,10 +896,12 @@ export async function handleRevisionReply(
   let item: Item | undefined;
   try {
     db = openDb(cfg.dbPath);
+    // Deliberately not filtered by state: an item that has moved on still owes
+    // the operator an explanation, and every check below is applied first.
     item = db.prepare(`
       SELECT * FROM mail_items
       WHERE callback_token = ? AND run_mode = 'production'
-        AND state = 'REVISION_REQUESTED' AND card_channel = 'telegram'
+        AND card_channel = 'telegram'
         AND card_account_id = ? AND card_chat_id = ?
     `).get(token, accountId, chatId) as Item | undefined;
   } catch (error: any) {
@@ -765,23 +913,37 @@ export async function handleRevisionReply(
   } finally {
     db?.close();
   }
-  if (!item) {
-    return {
-      handled: true,
-      text: "This Mailroom revision prompt is stale or does not match this bot and chat. Nothing was changed.",
-    };
+  if (!item) return { handled: true, text: STALE_REVISION_PROMPT };
+  const cardThreadId = item.card_thread_id == null || String(item.card_thread_id) === ""
+    ? undefined
+    : String(item.card_thread_id);
+  if (cardThreadId && conversation.threadId !== cardThreadId) {
+    return { handled: true, text: STALE_REVISION_PROMPT };
   }
-  if (senderId !== String(item.card_chat_id)) {
+  const cardChatId = String(item.card_chat_id);
+  if (isTelegramGroupChat(cardChatId)) {
+    if (!groupRevisionReplyAuthorized(ctx, senderId, resolvedRevisionApprovers(cfg))) {
+      return {
+        handled: true,
+        text: "Mailroom revision rejected: sender is not authorized. Nothing was changed.",
+      };
+    }
+  } else if (senderId !== cardChatId) {
     return {
       handled: true,
       text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed.",
     };
   }
+  if (item.state !== "REVISION_REQUESTED") {
+    return { handled: true, text: supersededRevisionMessage(String(item.state)) };
+  }
 
   try {
     return {
       handled: true,
-      text: revisionResultMessage(await runRevision(cfg, token, instructions, accountId, chatId)),
+      text: revisionResultMessage(
+        await runRevision(cfg, token, instructions, accountId, chatId, cardThreadId),
+      ),
     };
   } catch (error: any) {
     logInternalError("revision reply execution failed", error);
@@ -798,7 +960,6 @@ export async function handleRevisionReply(
 export async function handleRevisionCommand(
   ctx: Record<string, any>, cfg: Config,
 ): Promise<{ text: string }> {
-  if (!ctx.isAuthorizedSender) return { text: "Mailroom revision rejected: sender is not authorized." };
   const match = String(ctx.args || "").match(/^([A-Za-z0-9_-]{8,32})\s+([\s\S]+)$/);
   if (!match) return { text: "Usage: /mr-revise <token> <instructions>" };
   const token = match[1];
@@ -815,10 +976,12 @@ export async function handleRevisionCommand(
   let item: Item | undefined;
   try {
     db = openDb(cfg.dbPath);
+    // Not filtered by state; the chat, thread, and sender checks below still gate
+    // everything, and a superseded token deserves an explanation over a refusal.
     item = db.prepare(`
       SELECT * FROM mail_items
       WHERE callback_token = ? AND run_mode = 'production'
-        AND state = 'REVISION_REQUESTED' AND card_channel = 'telegram'
+        AND card_channel = 'telegram'
         AND card_account_id = ?
     `).get(token, accountId) as Item | undefined;
   } catch (error: any) {
@@ -832,13 +995,38 @@ export async function handleRevisionCommand(
   if (!item) {
     return { text: "This Mailroom revision token is stale or does not match this bot. Nothing was changed." };
   }
-  if (senderId !== String(item.card_chat_id)) {
-    return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+  const cardChatId = String(item.card_chat_id);
+  const cardThreadId = item.card_thread_id == null || String(item.card_thread_id) === ""
+    ? undefined
+    : String(item.card_thread_id);
+  const conversation = parseTelegramConversationId(String(ctx.conversationId || ""));
+  if (isTelegramGroupChat(cardChatId)) {
+    if (!groupRevisionAuthorized(ctx)) {
+      return { text: "Mailroom revision rejected: sender is not authorized." };
+    }
+    if (!conversation.chatId || conversation.chatId !== cardChatId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
+    if (cardThreadId && conversation.threadId !== cardThreadId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
+  } else {
+    if (!ctx.isAuthorizedSender) {
+      return { text: "Mailroom revision rejected: sender is not authorized." };
+    }
+    if (senderId !== cardChatId) {
+      return { text: "Mailroom revision rejected: sender does not match the authorized approval chat. Nothing was changed." };
+    }
+  }
+  if (item.state !== "REVISION_REQUESTED") {
+    return { text: supersededRevisionMessage(String(item.state)) };
   }
   try {
     return {
       text: revisionResultMessage(
-        await runRevision(cfg, token, instructions, accountId, String(item.card_chat_id)),
+        await runRevision(
+          cfg, token, instructions, accountId, cardChatId, cardThreadId,
+        ),
       ),
     };
   } catch (error: any) {
@@ -1130,6 +1318,32 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
         await ctx.respond.reply({ text: "This draft decision was already handled." });
         return { handled: true };
       }
+      // A recovered attempt carries the draft its interrupted run left in Outlook.
+      // Discard it before creating a replacement so no duplicate survives.
+      if (item.outlook_draft_id) {
+        const discarded = await discardOutlookDraft(cfg, item);
+        if (!discarded.success) {
+          if (discarded.error) logInternalError("stale Outlook draft cleanup returned failure", discarded.error);
+          failState(
+            db, item.mail_item_id, "OUTLOOK_DRAFTING", "ERROR",
+            discarded.error || "Stale Outlook draft cleanup failed",
+          );
+          await ctx.respond.editMessage({
+            text: `❌ The Outlook draft left by an interrupted attempt could not be removed, so no new draft was created. ${LOCAL_ERROR_NOTE}`,
+            buttons: [],
+          });
+          return { handled: true };
+        }
+        const cleared = claim(
+          db, item, ["OUTLOOK_DRAFTING"], "OUTLOOK_DRAFTING", "mailroom-draft-cleanup",
+          { outlook_draft_id: null, approval_fingerprint: null },
+        );
+        if (!cleared) {
+          await ctx.respond.reply({ text: "This item was handled while its superseded Outlook draft was being removed." });
+          return { handled: true };
+        }
+        item = cleared;
+      }
       const p = proposal(item);
       const creator = cfg.draftCreator ?? createOutlookReplyDraft;
       let result: Record<string, any>;
@@ -1141,6 +1355,15 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
           conversation_id: item.conversation_id,
           received_after: item.reply_target_received_at || item.received_at,
           sender_email: item.reply_target_sender_email || item.sender_email,
+          // Record the draft while it exists but is unfinished, so an interrupted
+          // run leaves a tracked draft the recovery path can discard.
+          onDraftCreated: (draftId: string) => {
+            const tracked = claim(
+              db, item!, ["OUTLOOK_DRAFTING"], "OUTLOOK_DRAFTING", "mailroom-draft-tracking",
+              { outlook_draft_id: draftId },
+            );
+            if (tracked) item = tracked;
+          },
         });
       } catch (error: any) {
         logInternalError("Outlook draft creation failed", error);

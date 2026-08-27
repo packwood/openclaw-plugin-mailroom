@@ -299,6 +299,12 @@ export type OutlookReplyDraftInput = {
   conversation_id?: string;
   received_after?: string;
   sender_email?: string;
+  /**
+   * Called with the draft id the moment Outlook returns it, before the reply
+   * body is patched in. Lets the caller record the draft while it exists but is
+   * not yet finished, so an interrupted attempt leaves no untracked draft.
+   */
+  onDraftCreated?: (draftId: string) => void | Promise<void>;
 };
 
 export type OutlookSendInput = {
@@ -712,6 +718,15 @@ export async function createOutlookReplyDraft(
     }
     const replyId = cr.json?.id as string | undefined;
     if (!replyId) return { success: false, error: `${action} returned no draft id (HTTP ${cr.status})` };
+    if (p.onDraftCreated) {
+      // Best effort: the draft already exists in Outlook, so a failure to record
+      // it must not abandon it here — the id is still returned to the caller.
+      try {
+        await p.onDraftCreated(replyId);
+      } catch (error: any) {
+        warnings.push(`could not record the new draft id (${String(error?.message ?? error).slice(0, 120)})`);
+      }
+    }
     const bodyObj = cr.json.body ?? {};
     const ctype = String(bodyObj.contentType ?? "html").toLowerCase();
     const existing = String(bodyObj.content ?? "");

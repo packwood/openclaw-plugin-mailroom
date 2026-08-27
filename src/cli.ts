@@ -15,6 +15,8 @@ type CliContext = {
     pythonExecutable?: string;
     pythonPath?: string;
     telegramChatId?: string;
+    telegramThreadId?: string;
+    telegramDestinations?: Record<string, { chatId: string; threadId?: string }>;
     routingReviewAgentId?: string;
     routingReviewTelegramAccountId?: string;
     accounts?: Record<string, string>;
@@ -69,6 +71,21 @@ export function buildEngineArgs(
       throw new Error("Mailroom telegramChatId must be configured for this command");
     }
     forwarded.push("--telegram-chat-id", cfg.telegramChatId);
+  }
+  if (
+    ["cycle", "dispatch"].includes(command)
+    && cfg.telegramThreadId
+    && !hasOption(forwarded, "--telegram-thread-id")
+  ) {
+    forwarded.push("--telegram-thread-id", cfg.telegramThreadId);
+  }
+  if (
+    ["cycle", "dispatch"].includes(command)
+    && cfg.telegramDestinations
+    && Object.keys(cfg.telegramDestinations).length
+    && !hasOption(forwarded, "--telegram-destinations")
+  ) {
+    forwarded.push("--telegram-destinations", JSON.stringify(cfg.telegramDestinations));
   }
   if (
     ["cycle", "dispatch"].includes(command)

@@ -5,6 +5,26 @@ Semantic Versioning after the first stable release.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `telegramThreadId` so Mailroom cards can target a Telegram forum topic.
+- Per-owner `telegramDestinations` map so each agent's approval cards go to that
+  agent's Telegram group or topic, with `telegramChatId`/`telegramThreadId` as
+  the global fallback.
+- Persist `card_thread_id` on approval cards so revisions re-post into the
+  original forum topic.
+
+### Fixed
+
+- Match revision replies in Telegram forum topics by normalizing
+  `<chatId>:topic:<threadId>` conversation IDs before ledger lookup.
+- Authorize group-topic revisions with a fail-closed `isAuthorizedSender`
+  check instead of treating the group chat ID as a user ID.
+- Authorize natural-language group-card revision replies via
+  `revisionApprovers` (defaulting to `[telegramChatId]` when that value is a
+  DM id), because OpenClaw's `before_dispatch` hook does not populate
+  `isAuthorizedSender`.
+
 ## [0.1.10] - 2026-07-31
 
 ### Fixed

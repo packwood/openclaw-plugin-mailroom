@@ -27,6 +27,8 @@ from .dispatcher import (
     DraftDispatcher,
     OpenClawAgentRunner,
     TelegramCardNotifier,
+    TransientAgentError,
+    parse_telegram_destinations,
     proposal_violations,
 )
 from .drafting_policy import DraftingPolicy
@@ -117,6 +119,13 @@ def _triage_cycle_failed(summary: dict) -> bool:
     )
 
 
+def _telegram_destinations(raw: str | None):
+    try:
+        return parse_telegram_destinations(raw)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mailroom", description="Mailroom deterministic control CLI"
@@ -167,6 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     cycle.add_argument("--telegram-chat-id", required=True)
+    cycle.add_argument("--telegram-thread-id")
+    cycle.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
     cycle.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
@@ -212,6 +226,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulepacks", default=str(Path(__file__).with_name("rulepacks"))
     )
     dispatch.add_argument("--telegram-chat-id", required=True)
+    dispatch.add_argument("--telegram-thread-id")
+    dispatch.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
     dispatch.add_argument(
         "--routing-review-telegram-account-id", default="default",
         help="Telegram account for ambiguous routing-review cards",
@@ -235,6 +254,11 @@ def build_parser() -> argparse.ArgumentParser:
     revise.add_argument("instructions")
     revise.add_argument("--account-id", required=True)
     revise.add_argument("--telegram-chat-id", required=True)
+    revise.add_argument("--telegram-thread-id")
+    revise.add_argument(
+        "--telegram-destinations",
+        help="JSON object mapping OpenClaw agent ids to {chatId, threadId?}",
+    )
 
     profiles = sub.add_parser(
         "profiles", help="Generate and inspect fleet responsibility profiles"
@@ -533,8 +557,10 @@ def main(argv: list[str] | None = None) -> int:
             DraftDispatcher(
                 ledger,
                 OpenClawAgentRunner(),
-                TelegramCardNotifier(),
+                TelegramCardNotifier(thread_id=args.telegram_thread_id),
                 telegram_chat_id=args.telegram_chat_id,
+                telegram_thread_id=args.telegram_thread_id,
+                telegram_destinations=_telegram_destinations(args.telegram_destinations),
                 review_agent_id=args.routing_review_agent_id,
                 review_account_id=args.routing_review_telegram_account_id,
                 review_owners=_review_owners(profiles, router),
@@ -624,8 +650,10 @@ def main(argv: list[str] | None = None) -> int:
         dispatch_only_summary = DraftDispatcher(
             ledger,
             OpenClawAgentRunner(),
-            TelegramCardNotifier(),
+            TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
+            telegram_thread_id=args.telegram_thread_id,
+            telegram_destinations=_telegram_destinations(args.telegram_destinations),
             review_agent_id=args.routing_review_agent_id,
             review_account_id=args.routing_review_telegram_account_id,
             review_owners=_review_owners(profiles, router),
@@ -668,11 +696,13 @@ def main(argv: list[str] | None = None) -> int:
                 "MATON_API_KEY is unavailable in the environment or ~/.openclaw/.env"
             )
         connection = resolve_connection(target["mailbox"])
-        item = DraftDispatcher(
+        dispatcher = DraftDispatcher(
             ledger,
             OpenClawAgentRunner(),
-            TelegramCardNotifier(),
+            TelegramCardNotifier(thread_id=args.telegram_thread_id),
             telegram_chat_id=args.telegram_chat_id,
+            telegram_thread_id=args.telegram_thread_id,
+            telegram_destinations=_telegram_destinations(args.telegram_destinations),
             reply_checker=MatonSentReplyChecker(
                 connection_id=connection, api_key=api_key
             ),
@@ -683,12 +713,27 @@ def main(argv: list[str] | None = None) -> int:
                 connection_id=connection, api_key=api_key
             ),
             mailbox=target["mailbox"],
-        ).revise(
-            args.item,
-            args.instructions,
-            account_id=args.account_id,
-            chat_id=args.telegram_chat_id,
         )
+        try:
+            item = dispatcher.revise(
+                args.item,
+                args.instructions,
+                account_id=args.account_id,
+                chat_id=args.telegram_chat_id,
+            )
+        except TransientAgentError as exc:
+            # The revision stayed pending, so report a retryable outcome rather
+            # than a hard failure; the operator can reply to the same prompt again.
+            _print(
+                {
+                    "ok": False,
+                    "retryable": True,
+                    "mail_item_id": target["mail_item_id"],
+                    "state": MailState.REVISION_REQUESTED.value,
+                    "error": str(exc),
+                }
+            )
+            return 0
         _print(
             {
                 "ok": True,
