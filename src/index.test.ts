@@ -794,6 +794,73 @@ describe("Mailroom interactive handler", () => {
     expect(test.replies[0].text).not.toContain("validator offline");
   });
 
+  it("records the Outlook draft id before the draft is finished", async () => {
+    const path = fixture();
+    const test = context("primary", "approve");
+    let stateWhileDrafting: any;
+    await handleInteractive(test.ctx, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", reviewOwners: ["primary"],
+      policyValidator: async () => ({ ok: true, violations: [] }),
+      draftCreator: async (input: any) => {
+        await input.onDraftCreated("draft-in-progress");
+        const db = new DatabaseSync(path);
+        stateWhileDrafting = db.prepare("SELECT state, outlook_draft_id FROM mail_items").get();
+        db.close();
+        return { success: true, draft_id: "draft-in-progress", approval_token: "fingerprint" };
+      },
+    } as any);
+    // The interrupted-run window: the draft exists in Outlook and the ledger knows it.
+    expect(stateWhileDrafting).toMatchObject({
+      state: "OUTLOOK_DRAFTING", outlook_draft_id: "draft-in-progress",
+    });
+    const db = new DatabaseSync(path);
+    expect(db.prepare("SELECT state, outlook_draft_id FROM mail_items").get()).toMatchObject({
+      state: "SEND_APPROVAL_PENDING", outlook_draft_id: "draft-in-progress",
+    });
+    db.close();
+  });
+
+  it("discards an interrupted attempt's draft before creating a replacement", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET outlook_draft_id='orphan-draft'").run();
+    db.close();
+    const test = context("primary", "approve");
+    const deleted: any[] = [];
+    await handleInteractive(test.ctx, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", reviewOwners: ["primary"],
+      policyValidator: async () => ({ ok: true, violations: [] }),
+      draftDeleter: async (input: any) => { deleted.push(input.draft_id); return { success: true }; },
+      draftCreator: async () => ({ success: true, draft_id: "fresh-draft", approval_token: "fingerprint" }),
+    } as any);
+    expect(deleted).toEqual(["orphan-draft"]);
+    const after = new DatabaseSync(path);
+    expect(after.prepare("SELECT state, outlook_draft_id FROM mail_items").get()).toMatchObject({
+      state: "SEND_APPROVAL_PENDING", outlook_draft_id: "fresh-draft",
+    });
+    after.close();
+  });
+
+  it("creates no replacement when an interrupted attempt's draft cannot be removed", async () => {
+    const path = fixture();
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET outlook_draft_id='orphan-draft'").run();
+    db.close();
+    const test = context("primary", "approve");
+    const created: any[] = [];
+    await handleInteractive(test.ctx, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", reviewOwners: ["primary"],
+      policyValidator: async () => ({ ok: true, violations: [] }),
+      draftDeleter: async () => ({ success: false, error: "Graph unavailable" }),
+      draftCreator: async (input: any) => { created.push(input); return { success: true, draft_id: "x", approval_token: "y" }; },
+    } as any);
+    expect(created).toEqual([]);
+    const after = new DatabaseSync(path);
+    expect((after.prepare("SELECT state FROM mail_items").get() as any).state).toBe("ERROR");
+    after.close();
+    expect(test.edits[0].text).toContain("could not be removed");
+  });
+
   it("makes Send approval redispatchable when the card edit fails", async () => {
     const path = fixture();
     const test = context("primary", "approve");

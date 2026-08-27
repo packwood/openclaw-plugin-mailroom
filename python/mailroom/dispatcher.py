@@ -452,6 +452,7 @@ class DraftDispatcher:
         released_deferred = len(self.ledger.release_due_deferred(mailbox=self.mailbox))
         drafted = cards_sent = review_cards_sent = replied_elsewhere = no_reply_dropped = errors = 0
         self._recover_stale_drafting(limit=limit)
+        self._recover_stale_outlook_drafting(limit=limit)
 
         reviews = self.ledger.list_items(
             state=MailState.ROUTING_REVIEW, run_mode="production",
@@ -626,21 +627,52 @@ class DraftDispatcher:
             no_reply_dropped=no_reply_dropped, errors=errors,
         )
 
-    def _recover_stale_drafting(self, *, limit: int) -> None:
+    def _expired_lease_items(self, state: MailState, *, limit: int) -> list[dict[str, Any]]:
+        """Items holding a working state past its lease, so their worker is gone."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.drafting_lease_seconds)
-        stale = self.ledger.list_items(
-            state=MailState.DRAFTING, run_mode="production",
+        expired = []
+        for item in self.ledger.list_items(
+            state=state, run_mode="production",
             mailbox=self.mailbox, limit=limit, order_by_priority=True,
-        )
-        for item in stale:
+        ):
             try:
                 updated_at = datetime.fromisoformat(str(item.get("updated_at") or ""))
                 if updated_at.tzinfo is None:
                     updated_at = updated_at.replace(tzinfo=timezone.utc)
             except ValueError:
                 updated_at = datetime.min.replace(tzinfo=timezone.utc)
-            if updated_at >= cutoff:
+            if updated_at < cutoff:
+                expired.append(item)
+        return expired
+
+    def _recover_stale_outlook_drafting(self, *, limit: int) -> None:
+        """Return an interrupted Outlook draft creation to the approval gate.
+
+        Unlike prose drafting, this state has an outward side effect: the plugin
+        asks Outlook to create the reply draft. Recovering to DRAFT_PROPOSED with
+        no card makes the dispatcher re-send the approval card, and the approve
+        path discards any draft recorded for the interrupted attempt before
+        creating a new one, so the retry cannot leave a duplicate behind.
+        """
+        for item in self._expired_lease_items(MailState.OUTLOOK_DRAFTING, limit=limit):
+            try:
+                self.ledger.transition(
+                    item["mail_item_id"], MailState.DRAFT_PROPOSED,
+                    actor="dispatcher:stale-outlook-draft-recovery",
+                    expected_states=[MailState.OUTLOOK_DRAFTING],
+                    patch={
+                        "card_message_id": None,
+                        "last_error": (
+                            "Recovered an expired Outlook drafting lease; "
+                            "the approval card was re-sent."
+                        ),
+                    },
+                )
+            except ConcurrentUpdate:
                 continue
+
+    def _recover_stale_drafting(self, *, limit: int) -> None:
+        for item in self._expired_lease_items(MailState.DRAFTING, limit=limit):
             instructions = self.ledger.revision_instructions_in_flight(item["mail_item_id"])
             if instructions and self._resume_stale_revision(item, instructions):
                 continue

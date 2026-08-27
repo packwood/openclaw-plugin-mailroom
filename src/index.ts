@@ -1293,6 +1293,32 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
         await ctx.respond.reply({ text: "This draft decision was already handled." });
         return { handled: true };
       }
+      // A recovered attempt carries the draft its interrupted run left in Outlook.
+      // Discard it before creating a replacement so no duplicate survives.
+      if (item.outlook_draft_id) {
+        const discarded = await discardOutlookDraft(cfg, item);
+        if (!discarded.success) {
+          if (discarded.error) logInternalError("stale Outlook draft cleanup returned failure", discarded.error);
+          failState(
+            db, item.mail_item_id, "OUTLOOK_DRAFTING", "ERROR",
+            discarded.error || "Stale Outlook draft cleanup failed",
+          );
+          await ctx.respond.editMessage({
+            text: `❌ The Outlook draft left by an interrupted attempt could not be removed, so no new draft was created. ${LOCAL_ERROR_NOTE}`,
+            buttons: [],
+          });
+          return { handled: true };
+        }
+        const cleared = claim(
+          db, item, ["OUTLOOK_DRAFTING"], "OUTLOOK_DRAFTING", "mailroom-draft-cleanup",
+          { outlook_draft_id: null, approval_fingerprint: null },
+        );
+        if (!cleared) {
+          await ctx.respond.reply({ text: "This item was handled while its superseded Outlook draft was being removed." });
+          return { handled: true };
+        }
+        item = cleared;
+      }
       const p = proposal(item);
       const creator = cfg.draftCreator ?? createOutlookReplyDraft;
       let result: Record<string, any>;
@@ -1304,6 +1330,15 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
           conversation_id: item.conversation_id,
           received_after: item.reply_target_received_at || item.received_at,
           sender_email: item.reply_target_sender_email || item.sender_email,
+          // Record the draft while it exists but is unfinished, so an interrupted
+          // run leaves a tracked draft the recovery path can discard.
+          onDraftCreated: (draftId: string) => {
+            const tracked = claim(
+              db, item!, ["OUTLOOK_DRAFTING"], "OUTLOOK_DRAFTING", "mailroom-draft-tracking",
+              { outlook_draft_id: draftId },
+            );
+            if (tracked) item = tracked;
+          },
         });
       } catch (error: any) {
         logInternalError("Outlook draft creation failed", error);

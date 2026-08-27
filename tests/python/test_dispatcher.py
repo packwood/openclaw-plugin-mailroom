@@ -835,6 +835,50 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(pending["state"], MailState.REVISION_REQUESTED.value)
         self.assertIn("gateway closed", pending["last_error"])
 
+    def test_stale_outlook_drafting_returns_to_the_approval_gate(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Ready"})
+        item = self.ledger.attach_card(
+            item["mail_item_id"], channel="telegram", account_id="primary",
+            chat_id="chat", message_id="card",
+        )
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.OUTLOOK_DRAFTING, actor="operator:telegram",
+            patch={"outlook_draft_id": "orphan-draft"},
+        )
+        self._expire_drafting_lease(item["mail_item_id"])
+
+        notifier = FakeNotifier()
+        self.dispatcher(FakeRunner(), notifier).run()
+
+        recovered = self.ledger.get(item["mail_item_id"])
+        self.assertEqual(recovered["state"], MailState.DRAFT_PROPOSED.value)
+        # The interrupted attempt's draft stays recorded so the approve path can
+        # discard it instead of leaving a duplicate in Outlook.
+        self.assertEqual(recovered["outlook_draft_id"], "orphan-draft")
+        self.assertEqual(recovered["card_message_id"], "99")
+        self.assertIn("Outlook drafting lease", recovered["last_error"])
+
+    def test_fresh_outlook_drafting_is_left_alone(self):
+        item = self.ledger.request_draft(self.item["mail_item_id"])
+        item = self.ledger.start_drafting(item["mail_item_id"])
+        item = self.ledger.propose_draft(item["mail_item_id"], {"reply_text": "Ready"})
+        item = self.ledger.attach_card(
+            item["mail_item_id"], channel="telegram", account_id="primary",
+            chat_id="chat", message_id="card",
+        )
+        item = self.ledger.transition(
+            item["mail_item_id"], MailState.OUTLOOK_DRAFTING, actor="operator:telegram",
+        )
+
+        self.dispatcher(FakeRunner()).run()
+
+        self.assertEqual(
+            self.ledger.get(item["mail_item_id"])["state"],
+            MailState.OUTLOOK_DRAFTING.value,
+        )
+
     def test_stale_ordinary_draft_is_still_requeued(self):
         item = self.ledger.request_draft(self.item["mail_item_id"])
         item = self.ledger.start_drafting(item["mail_item_id"])
