@@ -8,6 +8,7 @@ import plugin, {
   handleRevisionReply, invalidInstructionsMessage, revisionFailureMessage,
   routingOwnerCallbackRef, sendFailureState, verifyThreadRoute,
 } from "./index.js";
+import { RoutingOwnerDiscoveryError } from "./routing-owners.js";
 
 describe("Mailroom plugin metadata", () => {
   it("registers the Mailroom runtime display name", () => {
@@ -398,6 +399,48 @@ describe("Mailroom interactive handler", () => {
       state: "ROUTED", draft_owner: "research",
     });
     check.close();
+  });
+
+  it("tells the operator when fleet discovery, rather than profiles, is unavailable", async () => {
+    const path = fixture();
+    const root = dirname(path);
+    const profilesPath = join(root, "current.json");
+    writeFileSync(profilesPath, JSON.stringify({
+      validation_status: "valid",
+      fleet_agent_ids: ["primary"],
+      profiles: [{ agent_id: "primary" }],
+    }));
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET state='ROUTING_REVIEW', card_account_id='default'").run();
+    db.close();
+    const test = context("default", "route-primary");
+    await handleInteractive(test.ctx, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", profilesPath,
+      agentDiscovery: async () => { throw new RoutingOwnerDiscoveryError("fleet unavailable"); },
+    });
+    expect(test.replies[0].text).toContain("could not reach the OpenClaw fleet");
+    expect(test.replies[0].text).not.toContain("fleet unavailable");
+  });
+
+  it("tells the operator when responsibility profiles disagree with the fleet", async () => {
+    const path = fixture();
+    const root = dirname(path);
+    const profilesPath = join(root, "current.json");
+    writeFileSync(profilesPath, JSON.stringify({
+      validation_status: "valid",
+      fleet_agent_ids: ["primary"],
+      profiles: [{ agent_id: "primary" }],
+    }));
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE mail_items SET state='ROUTING_REVIEW', card_account_id='default'").run();
+    db.close();
+    const test = context("default", "route-primary");
+    await handleInteractive(test.ctx, {
+      dbPath: path, pythonPath: "", telegramChatId: "123456789", profilesPath,
+      agentDiscovery: async () => ["primary", "research"],
+    });
+    expect(test.replies[0].text).toContain("do not match the responsibility profiles");
+    expect(test.replies[0].text).not.toContain("missing profiles: research");
   });
 
   it("verifies both the routed item and persisted thread policy", () => {

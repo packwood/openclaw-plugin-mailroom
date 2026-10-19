@@ -16,6 +16,18 @@ export type RoutingOwnerConfig = {
   agentDiscovery?: () => Promise<string[]>;
 };
 
+/** A failure to obtain or parse the authoritative OpenClaw fleet listing. */
+export class RoutingOwnerDiscoveryError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "RoutingOwnerDiscoveryError";
+  }
+}
+
+// Agent avatars are inlined in `openclaw agents list --json`. This remains a
+// deliberate DoS guard, but is comfortably above normal fleets with avatars.
+const AGENT_DISCOVERY_MAX_BUFFER = 64 * 1024 * 1024;
+
 export const DEFAULT_PROFILES_PATH = join(
   homedir(), ".openclaw", "mailroom", "responsibility-profiles", "current.json",
 );
@@ -50,13 +62,36 @@ export function readProfileAgentIds(path = DEFAULT_PROFILES_PATH): string[] {
 }
 
 export async function discoverOpenClawAgentIds(): Promise<string[]> {
-  const { stdout } = await execFileAsync("openclaw", ["agents", "list", "--json"], {
-    timeout: 60000,
-    maxBuffer: 1024 * 1024,
-  });
-  const value = JSON.parse(stdout);
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("openclaw", ["agents", "list", "--json"], {
+      timeout: 60000,
+      maxBuffer: AGENT_DISCOVERY_MAX_BUFFER,
+    }));
+  } catch (error: any) {
+    const reason = error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      ? "its output exceeded Mailroom's 64 MiB safety limit"
+      : error?.killed && error?.signal === "SIGTERM"
+        ? "the command timed out after 60 seconds"
+        : "the command could not be run";
+    throw new RoutingOwnerDiscoveryError(
+      `OpenClaw agent discovery failed: ${reason}`,
+      { cause: error },
+    );
+  }
+  let value: any;
+  try {
+    value = JSON.parse(stdout);
+  } catch (error) {
+    throw new RoutingOwnerDiscoveryError(
+      "OpenClaw agent discovery returned unparseable JSON",
+      { cause: error },
+    );
+  }
   const agents = Array.isArray(value) ? value : value?.agents;
-  if (!Array.isArray(agents)) throw new Error("OpenClaw agent discovery returned no agent list");
+  if (!Array.isArray(agents)) {
+    throw new RoutingOwnerDiscoveryError("OpenClaw agent discovery returned no agent list");
+  }
   return normalizeAgentIds(agents.map((agent: any) => agent?.id ?? agent?.agentId));
 }
 

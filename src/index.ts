@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
@@ -16,6 +17,7 @@ import {
 import {
   DEFAULT_PROFILES_PATH,
   publishRoutingOwnerPolicy,
+  RoutingOwnerDiscoveryError,
   resolveRoutingOwnerIds,
   type RoutingOwnerMode,
 } from "./routing-owners.js";
@@ -63,10 +65,35 @@ export function sendFailureState(result: Record<string, any>): "SEND_APPROVAL_PE
 }
 
 const LOCAL_ERROR_NOTE = "Details were recorded in local Mailroom logs.";
+const INTERNAL_LOG_PATH = join(homedir(), ".openclaw", "mailroom", "logs", "mailroom.log");
+// Python CLI replies are structured and normally small, but revision output is
+// model-authored; 8 MiB is an intentional guard rather than an unexplained cap.
+const MAILROOM_CLI_MAX_BUFFER = 8 * 1024 * 1024;
 
 /** Record internal diagnostics locally without copying them into Telegram. */
 function logInternalError(context: string, error: unknown): void {
   console.error(`[mailroom] ${context}`, error);
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  const code = typeof candidate?.code === "string" ? candidate.code : "(none)";
+  const rawMessage = typeof candidate?.message === "string"
+    ? candidate.message.replace(/[\r\n]+/g, " ")
+    : String(error).replace(/[\r\n]+/g, " ");
+  const message = rawMessage.replace(
+    /\b(authorization|api[_ -]?key|token|password|client_secret)\s*([:=])\s*(?:bearer\s+)?[^\s,;]+/gi,
+    "$1$2[REDACTED]",
+  );
+  try {
+    mkdirSync(dirname(INTERNAL_LOG_PATH), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(INTERNAL_LOG_PATH), 0o700);
+    appendFileSync(
+      INTERNAL_LOG_PATH,
+      `${new Date().toISOString()} context=${context} code=${code} message=${message}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    chmodSync(INTERNAL_LOG_PATH, 0o600);
+  } catch (logError) {
+    console.error("[mailroom] failed to write local diagnostic log", logError);
+  }
 }
 
 export function revisionFailureMessage(_error: any): string {
@@ -488,7 +515,7 @@ async function validateProposalPolicy(cfg: Config, item: Item): Promise<Record<s
     {
       timeout: 30000,
       env: { ...process.env, PYTHONPATH: cfg.pythonPath },
-      maxBuffer: 1024 * 1024,
+      maxBuffer: MAILROOM_CLI_MAX_BUFFER,
     },
   );
   const result = JSON.parse(stdout);
@@ -701,7 +728,7 @@ async function runRevision(
     {
       timeout: 660000,
       env: { ...process.env, PYTHONPATH: cfg.pythonPath },
-      maxBuffer: 1024 * 1024,
+      maxBuffer: MAILROOM_CLI_MAX_BUFFER,
     },
   );
   const result = JSON.parse(stdout);
@@ -911,7 +938,9 @@ export async function handleInteractive(ctx: any, cfg: Config): Promise<{ handle
       } catch (error: any) {
         logInternalError("routing-owner validation failed", error);
         await ctx.respond.reply({
-          text: `Mailroom could not validate routing owners safely. ${LOCAL_ERROR_NOTE}`,
+          text: error instanceof RoutingOwnerDiscoveryError
+            ? `Mailroom could not reach the OpenClaw fleet to validate routing owners. Retry after the fleet is available. ${LOCAL_ERROR_NOTE}`
+            : `Mailroom routing owners do not match the responsibility profiles. Regenerate or correct the profiles before retrying. ${LOCAL_ERROR_NOTE}`,
         });
         return { handled: true };
       }

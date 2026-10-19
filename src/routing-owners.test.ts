@@ -1,10 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   publishRoutingOwnerPolicy,
+  discoverOpenClawAgentIds,
   readProfileAgentIds,
+  RoutingOwnerDiscoveryError,
   resolveRoutingOwnerIds,
 } from "./routing-owners.js";
 
@@ -54,6 +56,38 @@ describe("routing owners", () => {
       profilesPath: join(temporaryRoot(), "missing.json"),
       agentDiscovery: async () => ["bravo", "alpha", "bravo"],
     })).resolves.toEqual(["alpha", "bravo"]);
+  });
+
+  it("discovers a fleet listing larger than the former 1 MiB stdout cap", async () => {
+    const root = temporaryRoot();
+    const executable = join(root, "openclaw");
+    const originalPath = process.env.PATH;
+    const oversizedAvatar = `data:image/png;base64,${"a".repeat(1_300_000)}`;
+    writeFileSync(executable, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify({
+      agents: [{ id: "primary", identityAvatarUrl: oversizedAvatar }, { id: "research" }],
+    }))});\n`);
+    chmodSync(executable, 0o755);
+    process.env.PATH = `${root}:${originalPath}`;
+    try {
+      await expect(discoverOpenClawAgentIds()).resolves.toEqual(["primary", "research"]);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("fails closed with a discovery error for an unparseable CLI response", async () => {
+    const root = temporaryRoot();
+    const executable = join(root, "openclaw");
+    const originalPath = process.env.PATH;
+    writeFileSync(executable, "#!/bin/sh\nprintf '{truncated'\n");
+    chmodSync(executable, 0o755);
+    process.env.PATH = `${root}:${originalPath}`;
+    try {
+      await expect(discoverOpenClawAgentIds()).rejects.toBeInstanceOf(RoutingOwnerDiscoveryError);
+      await expect(discoverOpenClawAgentIds()).rejects.toThrow("unparseable JSON");
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 
   it("honors selected mode", async () => {
